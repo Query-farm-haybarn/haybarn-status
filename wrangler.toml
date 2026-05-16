@@ -9,7 +9,13 @@ account_id = "bb68a133a66d26a310231495b13479a1"
 # then paste the returned id below.
 [[kv_namespaces]]
 binding = "STATUS_KV"
-id = "REPLACE_WITH_KV_ID_AFTER_CREATE"
+id = "85108e76b21b44ba9c69da7f26a4dc56"
+
+# Custom domain. Cloudflare auto-creates the proxied DNS record in the
+# query.farm zone on deploy and provisions the TLS cert.
+[[routes]]
+pattern = "haybarn-status.query.farm"
+custom_domain = true
 
 [observability]
 enabled = true
