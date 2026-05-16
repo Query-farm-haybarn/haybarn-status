@@ -99,11 +99,25 @@ export async function buildForks(env) {
 
 const EXT_PATH_RE = /^extensions\/([\w.-]+)\/description\.yml$/;
 
+// haybarn-community-extensions/build.yml sets its run-name to "🐤 <extname>"
+// whenever extension_name comes in via workflow_dispatch or workflow_call
+// inputs (this is what build_all and any per-extension manual builds look
+// like). Pull the name out of display_title cheaply — no API call needed.
+const DISPLAY_TITLE_RE = /🐤\s+([\w.-]+)/;
+
+function extensionFromDisplayTitle(title) {
+  if (!title) return null;
+  const m = title.match(DISPLAY_TITLE_RE);
+  return m ? m[1] : null;
+}
+
 // Returns the single extension this commit touched, or null when the commit
 // touched zero or multiple descriptors. Multi-descriptor commits are bulk
 // import/refactor operations (e.g. sync_from_upstream landing 240 descriptors
 // in one go) — the workflow only ever builds ONE extension per run, so we
-// can't reliably attribute a multi-descriptor commit to a specific extension.
+// can't reliably attribute a multi-descriptor commit to a specific extension
+// via files alone. (Workflow_dispatch invocations DO know which extension
+// they built; we read those from display_title above, before this fallback.)
 async function commitSingleExtension(env, sha) {
   try {
     const commit = await ghFetch(env, `/repos/${ORG}/${COMMUNITY_REPO.repo}/commits/${sha}`);
@@ -119,11 +133,16 @@ async function commitSingleExtension(env, sha) {
 }
 
 // Scan the most recent N community runs to build a per-extension status matrix.
-// Strategy: a given community workflow run builds ONE extension (the one whose
-// descriptor was touched on the commit, or workflow_dispatch input). We identify
-// the extension via the head_commit's changed files (deduped by SHA across
-// runs). For each extension we keep the run with the highest run_number and
-// fetch its jobs to expose the platform-leg matrix.
+// Extension-name resolution order, per-run:
+//   1. display_title ("🐤 <name>") — set by build.yml's run-name expression
+//      when extension_name comes in as a workflow input. Covers build_all
+//      fan-outs and manual workflow_dispatch invocations. No API cost.
+//   2. head_commit's changed files — for push-triggered builds where a
+//      single descriptor was edited. Requires a /commits/{sha} call per
+//      unique sha (deduped). Skipped for bulk-import commits.
+//
+// For each identified extension we keep the run with the highest run_number
+// and fetch its jobs to expose the platform-leg matrix.
 export async function buildCommunityMatrix(env, { perPage = 100 } = {}) {
   let runs = [];
   try {
@@ -136,19 +155,34 @@ export async function buildCommunityMatrix(env, { perPage = 100 } = {}) {
     return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], error: String(e.message || e), _disclaimer: DISCLAIMER };
   }
 
-  // Resolve each unique head_sha to the single extension that commit touched
-  // (or null if it was a bulk-import / non-descriptor commit).
-  const uniqueShas = [...new Set(runs.map(r => r.head_sha).filter(Boolean))];
-  const shaExt = new Map();
-  await Promise.all(uniqueShas.map(async (sha) => {
-    shaExt.set(sha, await commitSingleExtension(env, sha));
+  // Pass 1: try display_title (free, no API call). Mark which runs still
+  // need commit-based attribution.
+  const runExt = new Map();          // runId → extension name
+  const needCommit = new Map();      // sha → list of runs needing fallback
+  for (const r of runs) {
+    const fromTitle = extensionFromDisplayTitle(r.display_title || r.name);
+    if (fromTitle) {
+      runExt.set(r.id, fromTitle);
+    } else if (r.head_sha) {
+      if (!needCommit.has(r.head_sha)) needCommit.set(r.head_sha, []);
+      needCommit.get(r.head_sha).push(r);
+    }
+  }
+
+  // Pass 2: for runs without a display_title-derived name, look up the
+  // commit (deduped by sha). Multi-descriptor commits stay unattributed.
+  await Promise.all([...needCommit.keys()].map(async (sha) => {
+    const ext = await commitSingleExtension(env, sha);
+    if (ext) {
+      for (const r of needCommit.get(sha)) runExt.set(r.id, ext);
+    }
   }));
 
   // Group runs by attributable extension, keeping the highest run_number.
   const byExt = new Map();
   let skippedBulk = 0;
   for (const r of runs) {
-    const ext = shaExt.get(r.head_sha);
+    const ext = runExt.get(r.id);
     if (!ext) { skippedBulk++; continue; }
     const existing = byExt.get(ext);
     if (!existing || existing.run_number < r.run_number) byExt.set(ext, r);
