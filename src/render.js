@@ -64,13 +64,24 @@ tr:last-child td { border-bottom: none; }
 .job-cell .name { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
 .job-cell a.name { color: var(--accent); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-.side { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; }
+.side { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; margin-bottom: 18px; }
+.side h2 { margin: 0 0 10px; }
+.side h2 small { color: var(--muted); font-weight: 400; font-size: 12px; }
 .side .row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; gap: 8px; border-bottom: 1px solid var(--border); }
 .side .row:last-child { border-bottom: none; }
 .side small { color: var(--muted); }
-.counts { color: var(--muted); font-size: 12px; }
+.counts { color: var(--muted); font-size: 12px; display: inline-flex; gap: 8px; align-items: center; }
 .counts .ok { color: #3fb950; }
 .counts .bad { color: #f85149; }
+.community-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.community-row:last-child { border-bottom: none; }
+.community-ext { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; min-width: 160px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.community-row .jobs-grid { flex: 1; gap: 4px 12px; }
+.community-row .job-cell { font-size: 11px; }
+.community-row .job-cell .dot { width: 9px; height: 9px; }
+.title-bar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.title-bar h2 { margin: 0; }
+.run-link { color: var(--muted); font-size: 12px; }
 footer { color: var(--muted); padding: 24px; text-align: center; font-size: 12px; border-top: 1px solid var(--border); margin-top: 32px; }
 .tag-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 .tag-list a { display: block; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; }
@@ -110,6 +121,46 @@ function shortJobLabel(name) {
   if (m) return m[1];
   const parts = name.split(/\s*\/\s*/);
   return parts[parts.length - 1];
+}
+
+// Community-extensions job names take a few shapes depending on how the
+// workflow's matrix-of-matrices is configured. We extract an (extension,
+// platform) tuple by trying these patterns, in order:
+//   "build (extname) / build / Linux (linux_amd64, ...)"  → ext=extname, plat=linux_amd64
+//   "build_extname / Linux (linux_amd64, ...)"             → ext=extname, plat=linux_amd64
+//   "build / Linux (linux_amd64, ...)"                     → ext=null,    plat=linux_amd64
+// Today the catalog has a single smoke extension so the third shape is what
+// we mostly see; the first two activate once sync_from_upstream lands.
+function parseCommunityJob(name) {
+  let extension = null;
+  let rest = name;
+  const parenExt = name.match(/^([\w-]+)\s*\(([^)]+)\)/);
+  if (parenExt && !/[,_]/.test(parenExt[2])) {
+    // "build (extname) / ..."  — only treat the inner as an ext name when it
+    // doesn't look like a vcpkg-style triplet (no underscores, no commas).
+    extension = parenExt[2].trim();
+    rest = name.slice(parenExt[0].length);
+  } else {
+    const underscoreExt = name.match(/^build_([\w-]+)\s*\//);
+    if (underscoreExt) {
+      extension = underscoreExt[1];
+      rest = name.slice(underscoreExt[0].length);
+    }
+  }
+  const platMatch = rest.match(/\(\s*([A-Za-z0-9_.-]+)/);
+  const platform = platMatch ? platMatch[1] : shortJobLabel(rest);
+  return { extension, platform };
+}
+
+function groupCommunityJobs(jobs) {
+  const groups = new Map();
+  for (const j of jobs) {
+    const parsed = parseCommunityJob(j.name);
+    const key = parsed.extension || '(combined)';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ ...j, _platform: parsed.platform });
+  }
+  return groups;
 }
 
 function fmtRelative(iso) {
@@ -184,39 +235,85 @@ function renderRepoSection({ repo, label, runs, error }) {
   </section>`;
 }
 
-function renderSidePanel(side) {
-  if (!side) return `<aside class="side"><h2>Extensions snapshot</h2><div class="empty">loading…</div></aside>`;
-  const forkRows = side.forks.map(f => {
+function renderForkPanel(forks) {
+  const rows = forks.map(f => {
     const body = f.error
       ? `<span class="err">${escapeHtml(f.error)}</span>`
       : (f.run ? `${pillFor(f.run)} <small>${fmtRelative(f.run.updatedAt || f.run.createdAt)}</small>` : `<small>no runs</small>`);
     const link = f.run ? f.run.htmlUrl : `https://github.com/Query-farm-haybarn/${f.repo}/actions`;
     return `<div class="row"><a href="${escapeHtml(link)}">${escapeHtml(f.label)}</a>${body}</div>`;
   }).join('');
+  return `<aside class="side">
+    <h2>Build-fork extensions <small>(not rc-pinned)</small></h2>
+    ${rows}
+  </aside>`;
+}
 
-  let communityRow;
-  if (side.community.error) {
-    communityRow = `<div class="row"><a>Community</a><span class="err">${escapeHtml(side.community.error)}</span></div>`;
-  } else if (!side.community.run) {
-    communityRow = `<div class="row"><a>Community</a><small>no runs</small></div>`;
-  } else {
-    const c = side.community.jobsSummary?.counts || {};
-    const total = side.community.jobsSummary?.total || 0;
-    communityRow = `<div class="row">
-      <a href="${escapeHtml(side.community.run.htmlUrl)}">Community (${total} ext)</a>
-      <span class="counts">${pillFor(side.community.run)}
-        <span class="ok">✓ ${c.success || 0}</span>
-        <span class="bad">✗ ${(c.failure || 0)}</span>
-        <span>⟳ ${(c.in_progress || 0)}</span>
-      </span>
-    </div>`;
+function renderCommunityJobCell(j) {
+  const s = statusKey(j);
+  const cls = ['success', 'failure', 'timed_out', 'in_progress', 'queued',
+               'waiting', 'requested', 'pending', 'cancelled', 'skipped', 'neutral'].includes(s) ? s : '';
+  const label = j._platform || shortJobLabel(j.name);
+  const nameTag = j.htmlUrl
+    ? `<a class="name" href="${escapeHtml(j.htmlUrl)}">${escapeHtml(label)}</a>`
+    : `<span class="name">${escapeHtml(label)}</span>`;
+  return `<div class="job-cell" title="${escapeHtml(j.name)} — ${escapeHtml(s.replace('_', ' '))}"><span class="dot ${cls}"></span>${nameTag}</div>`;
+}
+
+function renderCommunitySection(c) {
+  if (!c) return '';
+  if (c.error) {
+    return `<section class="repo"><h2>Community extensions <span class="repo-name">(not rc-pinned)</span></h2>
+      <div class="err">${escapeHtml(c.error)}</div></section>`;
+  }
+  const exts = c.extensions || [];
+  if (!exts.length) {
+    return `<section class="repo"><h2>Community extensions <span class="repo-name">(not rc-pinned)</span></h2>
+      <div class="empty">no descriptor-touching runs in the last ${c.scannedRuns || 0} scanned</div></section>`;
   }
 
-  return `<aside class="side">
-    <h2>Extensions snapshot <small style="color:var(--muted);font-weight:400">(not rc-pinned)</small></h2>
-    ${forkRows}
-    ${communityRow}
-  </aside>`;
+  // Aggregate counts across all per-extension jobs.
+  let okC = 0, failC = 0, ipC = 0, totalC = 0;
+  for (const ext of exts) {
+    for (const j of (ext.jobs || [])) {
+      totalC++;
+      const s = statusKey(j);
+      if (s === 'success') okC++;
+      else if (s === 'failure' || s === 'timed_out') failC++;
+      else if (s === 'in_progress' || s === 'queued' || s === 'pending' || s === 'waiting') ipC++;
+    }
+  }
+
+  const rows = exts.map(ext => {
+    const cells = (ext.jobs || []).map(j => ({ ...j, _platform: parseCommunityJob(j.name).platform }));
+    const cellsHtml = cells.length
+      ? `<div class="jobs-grid">${cells.map(renderCommunityJobCell).join('')}</div>`
+      : `<span class="empty" style="font-size:12px">no jobs (run still spinning up)</span>`;
+    return `<div class="community-row">
+      <a class="community-ext" href="${escapeHtml(ext.run.htmlUrl)}" title="${escapeHtml(ext.name)} — run #${ext.run.runNumber}">${escapeHtml(ext.name)}</a>
+      ${pillFor(ext.run)}
+      ${cellsHtml}
+    </div>`;
+  }).join('');
+
+  return `<section class="repo">
+    <div class="title-bar">
+      <h2>Community extensions <span class="repo-name">— latest run per descriptor, scanned ${c.scannedRuns} runs${c.skippedBulkRuns ? ` (${c.skippedBulkRuns} bulk-edit runs skipped)` : ''}</span></h2>
+      <span class="counts">
+        <span>${exts.length} extension${exts.length === 1 ? '' : 's'}</span>
+        <span>${totalC} legs</span>
+        <span class="ok">✓ ${okC}</span>
+        <span class="bad">✗ ${failC}</span>
+        ${ipC ? `<span>⟳ ${ipC}</span>` : ''}
+      </span>
+    </div>
+    ${rows}
+  </section>`;
+}
+
+function renderSidePanel(side) {
+  if (!side) return `<aside class="side"><h2>Extensions snapshot</h2><div class="empty">loading…</div></aside>`;
+  return `${renderForkPanel(side.forks)}${renderCommunitySection(side.community)}`;
 }
 
 export function renderRcPage(view) {

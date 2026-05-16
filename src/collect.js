@@ -81,7 +81,7 @@ export async function listEngineTags(env) {
   return { fetchedAt: new Date().toISOString(), tags, _disclaimer: DISCLAIMER };
 }
 
-export async function buildSidePanel(env) {
+export async function buildForks(env) {
   const forks = await Promise.all(FORK_EXT_REPOS.map(async ({ repo, label }) => {
     try {
       const data = await ghFetch(
@@ -94,37 +94,83 @@ export async function buildSidePanel(env) {
       return { repo, label, run: null, error: String(e.message || e) };
     }
   }));
+  return { fetchedAt: new Date().toISOString(), forks, _disclaimer: DISCLAIMER };
+}
 
-  let community = { repo: COMMUNITY_REPO.repo, run: null, jobsSummary: null, error: null };
+const EXT_PATH_RE = /^extensions\/([\w.-]+)\/description\.yml$/;
+
+// Returns the single extension this commit touched, or null when the commit
+// touched zero or multiple descriptors. Multi-descriptor commits are bulk
+// import/refactor operations (e.g. sync_from_upstream landing 240 descriptors
+// in one go) — the workflow only ever builds ONE extension per run, so we
+// can't reliably attribute a multi-descriptor commit to a specific extension.
+async function commitSingleExtension(env, sha) {
+  try {
+    const commit = await ghFetch(env, `/repos/${ORG}/${COMMUNITY_REPO.repo}/commits/${sha}`);
+    const exts = new Set();
+    for (const f of commit.files || []) {
+      const m = f.filename.match(EXT_PATH_RE);
+      if (m) exts.add(m[1]);
+    }
+    return exts.size === 1 ? [...exts][0] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Scan the most recent N community runs to build a per-extension status matrix.
+// Strategy: a given community workflow run builds ONE extension (the one whose
+// descriptor was touched on the commit, or workflow_dispatch input). We identify
+// the extension via the head_commit's changed files (deduped by SHA across
+// runs). For each extension we keep the run with the highest run_number and
+// fetch its jobs to expose the platform-leg matrix.
+export async function buildCommunityMatrix(env, { perPage = 100 } = {}) {
+  let runs = [];
   try {
     const data = await ghFetch(
       env,
-      `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.workflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=1`,
+      `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.workflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=${perPage}`,
     );
-    const run = (data.workflow_runs || [])[0];
-    if (run) {
-      const jobs = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 3);
-      const counts = { success: 0, failure: 0, cancelled: 0, in_progress: 0, other: 0 };
-      for (const j of jobs) {
-        const c = j.conclusion || j.status;
-        if (c in counts) counts[c]++;
-        else counts.other++;
-      }
-      community = {
-        repo: COMMUNITY_REPO.repo,
-        run: summarizeRun(run, null),
-        jobsSummary: { total: jobs.length, counts },
-        error: null,
-      };
-    }
+    runs = data.workflow_runs || [];
   } catch (e) {
-    community.error = String(e.message || e);
+    return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], error: String(e.message || e), _disclaimer: DISCLAIMER };
   }
+
+  // Resolve each unique head_sha to the single extension that commit touched
+  // (or null if it was a bulk-import / non-descriptor commit).
+  const uniqueShas = [...new Set(runs.map(r => r.head_sha).filter(Boolean))];
+  const shaExt = new Map();
+  await Promise.all(uniqueShas.map(async (sha) => {
+    shaExt.set(sha, await commitSingleExtension(env, sha));
+  }));
+
+  // Group runs by attributable extension, keeping the highest run_number.
+  const byExt = new Map();
+  let skippedBulk = 0;
+  for (const r of runs) {
+    const ext = shaExt.get(r.head_sha);
+    if (!ext) { skippedBulk++; continue; }
+    const existing = byExt.get(ext);
+    if (!existing || existing.run_number < r.run_number) byExt.set(ext, r);
+  }
+
+  // Fetch jobs for each kept run (parallel, max 1 page → first 100 jobs).
+  const extensions = await Promise.all([...byExt.entries()].map(async ([name, run]) => {
+    let jobs = [];
+    try {
+      const all = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 1);
+      jobs = all.filter(j => /\(/.test(j.name)).map(summarizeJob);
+    } catch (_) { /* leave jobs empty */ }
+    return { name, run: summarizeRun(run, null), jobs };
+  }));
+
+  extensions.sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     fetchedAt: new Date().toISOString(),
-    forks,
-    community,
+    scannedRuns: runs.length,
+    skippedBulkRuns: skippedBulk,
+    extensions,
     _disclaimer: DISCLAIMER,
   };
 }

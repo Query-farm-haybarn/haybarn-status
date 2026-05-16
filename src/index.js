@@ -1,4 +1,4 @@
-import { buildRcView, buildSidePanel, listEngineTags } from './collect.js';
+import { buildRcView, buildForks, buildCommunityMatrix, listEngineTags } from './collect.js';
 import { renderIndex, renderRcPage, renderError } from './render.js';
 import { DISCLAIMER, TAG_PREFIX } from './repos.js';
 
@@ -57,11 +57,12 @@ async function handleRcPage(env, ctx, tag, asJson) {
       ? json({ error: 'invalid tag', _disclaimer: DISCLAIMER }, { status: 400 })
       : html(renderError(`invalid tag: ${tag}`, 400).body, { status: 400 });
   }
-  const [view, side] = await Promise.all([
+  const [view, forks, community] = await Promise.all([
     getCached(env, ctx, `rc:${tag}`, 30, 300, () => buildRcView(env, tag)),
-    getCached(env, ctx, 'side', 60, 300, () => buildSidePanel(env)),
+    getCached(env, ctx, 'forks', 60, 300, () => buildForks(env)),
+    getCached(env, ctx, 'community', 120, 900, () => buildCommunityMatrix(env)),
   ]);
-  const merged = { ...view, sidePanel: side };
+  const merged = { ...view, sidePanel: { forks: forks.forks, community } };
   return asJson ? json(merged) : html(renderRcPage(merged));
 }
 
