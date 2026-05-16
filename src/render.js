@@ -1,5 +1,7 @@
 import { DISCLAIMER } from './repos.js';
 
+const LOGO_URL = 'https://raw.githubusercontent.com/Query-farm-haybarn/.github/haybarn/profile/assets/haybarn-icon.png';
+
 const CSS = `
 :root {
   color-scheme: dark;
@@ -23,9 +25,12 @@ body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 code, pre, .mono { font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+header { padding: 14px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+header .brand { display: flex; align-items: center; gap: 12px; }
+header .brand img { width: 32px; height: 32px; border-radius: 6px; display: block; }
+header h1 { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.2; }
 header h1 a { color: var(--fg); }
+header h1 .tag { color: var(--muted); font-weight: 400; margin-left: 8px; }
 header .meta { color: var(--muted); font-size: 12px; }
 main { max-width: 1200px; margin: 0 auto; padding: 24px; }
 h2 { font-size: 16px; margin: 24px 0 12px; }
@@ -49,10 +54,16 @@ tr:last-child td { border-bottom: none; }
 .pill.cancelled,
 .pill.skipped,
 .pill.neutral    { background: var(--grey); color: var(--fg); }
-.jobs { margin-top: 6px; background: var(--panel2); border-radius: 4px; padding: 8px 12px; }
-.jobs ul { margin: 0; padding: 0; list-style: none; }
-.jobs li { padding: 3px 0; font-size: 13px; display: flex; align-items: center; gap: 8px; }
-.jobs li .pill { font-size: 10px; padding: 1px 6px; }
+.jobs { margin-top: 8px; background: var(--panel2); border-radius: 4px; padding: 10px 12px; }
+.jobs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 4px 16px; }
+.job-cell { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; padding: 2px 0; }
+.job-cell .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: var(--grey); }
+.job-cell .dot.success { background: var(--ok); }
+.job-cell .dot.failure, .job-cell .dot.timed_out { background: var(--fail); }
+.job-cell .dot.in_progress, .job-cell .dot.queued, .job-cell .dot.pending, .job-cell .dot.waiting, .job-cell .dot.requested { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+.job-cell .name { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.job-cell a.name { color: var(--accent); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 .side { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; }
 .side .row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; gap: 8px; border-bottom: 1px solid var(--border); }
 .side .row:last-child { border-bottom: none; }
@@ -77,11 +88,28 @@ function escapeHtml(s) {
     .replaceAll("'", '&#39;');
 }
 
+function statusKey(r) {
+  return r.status === 'completed' ? (r.conclusion || 'neutral') : (r.status || 'unknown');
+}
+
 function pillFor(run) {
-  const s = run.status === 'completed' ? (run.conclusion || 'neutral') : (run.status || 'unknown');
+  const s = statusKey(run);
   const cls = ['success', 'failure', 'timed_out', 'in_progress', 'queued', 'waiting',
                'requested', 'pending', 'cancelled', 'skipped', 'neutral'].includes(s) ? s : '';
   return `<span class="pill ${cls}">${escapeHtml(s.replace('_', ' '))}</span>`;
+}
+
+// Reusable-workflow job names look like:
+//   "Build extensions / Build / Linux (linux_amd64, ubuntu-24.04, x64-linux-release, ...)"
+//   "Build extensions / Build / DuckDB-Wasm (wasm_eh, wasm32-emscripten, x64-linux, ...)"
+// The first paren token is the platform triplet that uniquely identifies the leg.
+// For simpler matrix names ("Linux amd64", "macOS (universal)"), fall back to the
+// last "/"-segment or the original string.
+function shortJobLabel(name) {
+  const m = name.match(/\(\s*([A-Za-z0-9_.-]+)/);
+  if (m) return m[1];
+  const parts = name.split(/\s*\/\s*/);
+  return parts[parts.length - 1];
 }
 
 function fmtRelative(iso) {
@@ -116,11 +144,17 @@ function head(title) {
 
 function renderJobsList(jobs) {
   if (!jobs || !jobs.length) return '';
-  const items = jobs.map(j => {
-    const status = j.status === 'completed' ? (j.conclusion || 'neutral') : (j.status || 'unknown');
-    return `<li>${pillFor({ status: j.status, conclusion: j.conclusion })} <a href="${escapeHtml(j.htmlUrl)}">${escapeHtml(j.name)}</a></li>`;
+  const cells = jobs.map(j => {
+    const s = statusKey(j);
+    const cls = ['success', 'failure', 'timed_out', 'in_progress', 'queued',
+                 'waiting', 'requested', 'pending', 'cancelled', 'skipped', 'neutral'].includes(s) ? s : '';
+    const label = shortJobLabel(j.name);
+    const nameTag = j.htmlUrl
+      ? `<a class="name" href="${escapeHtml(j.htmlUrl)}">${escapeHtml(label)}</a>`
+      : `<span class="name">${escapeHtml(label)}</span>`;
+    return `<div class="job-cell" title="${escapeHtml(j.name)} — ${escapeHtml(s.replace('_', ' '))}"><span class="dot ${cls}"></span>${nameTag}</div>`;
   }).join('');
-  return `<div class="jobs"><ul>${items}</ul></div>`;
+  return `<div class="jobs"><div class="jobs-grid">${cells}</div></div>`;
 }
 
 function renderRepoSection({ repo, label, runs, error }) {
@@ -190,7 +224,10 @@ export function renderRcPage(view) {
   return `${head(`${view.tag} — haybarn-status`)}
 <body>
 <header>
-  <h1><a href="/">haybarn-status</a> · <span class="mono">${escapeHtml(view.tag)}</span></h1>
+  <div class="brand">
+    <a href="/" aria-label="haybarn-status"><img src="${LOGO_URL}" alt="" /></a>
+    <h1><a href="/">haybarn-status</a><span class="tag mono">${escapeHtml(view.tag)}</span></h1>
+  </div>
   <div class="meta">as of ${escapeHtml(view.fetchedAt)} · <a href="">refresh</a> · <a href="/api/r/${encodeURIComponent(view.tag)}">json</a></div>
 </header>
 <main>
@@ -208,7 +245,10 @@ export function renderIndex(tagsView) {
   return `${head('haybarn-status')}
 <body>
 <header>
-  <h1>haybarn-status</h1>
+  <div class="brand">
+    <img src="${LOGO_URL}" alt="" />
+    <h1>haybarn-status</h1>
+  </div>
   <div class="meta">CI status across the Haybarn project, powered by DuckDB · as of ${escapeHtml(tagsView.fetchedAt)}</div>
 </header>
 <main>
@@ -222,7 +262,7 @@ export function renderIndex(tagsView) {
 export function renderError(message, status = 500) {
   return {
     body: `${head('error · haybarn-status')}
-<body><header><h1><a href="/">haybarn-status</a></h1></header>
+<body><header><div class="brand"><img src="${LOGO_URL}" alt="" /><h1><a href="/">haybarn-status</a></h1></div></header>
 <main><h2>error</h2><pre>${escapeHtml(message)}</pre></main>
 <footer>${escapeHtml(DISCLAIMER)}</footer></body></html>`,
     status,
