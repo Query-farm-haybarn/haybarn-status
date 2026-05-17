@@ -60,7 +60,12 @@ async function handleRcPage(env, ctx, tag, asJson) {
   const [view, forks, community] = await Promise.all([
     getCached(env, ctx, `rc:${tag}`, 30, 300, () => buildRcView(env, tag)),
     getCached(env, ctx, 'forks', 60, 300, () => buildForks(env)),
-    getCached(env, ctx, 'community', 120, 900, () => buildCommunityMatrix(env)),
+    // Community matrix is the expensive one (paginated build_all job
+    // list, 20+ GH API calls per cold fetch). Aggressive stale window
+    // keeps users on cache forever after first load — background
+    // refreshes via ctx.waitUntil populate the new data invisibly.
+    // A scheduled() handler below also pre-warms on a cron.
+    getCached(env, ctx, 'community', 60, 86400, () => buildCommunityMatrix(env)),
   ]);
   const merged = { ...view, sidePanel: { forks: forks.forks, community } };
   return asJson ? json(merged) : html(renderRcPage(merged));
@@ -71,7 +76,30 @@ async function handleIndex(env, ctx) {
   return html(renderIndex(tags));
 }
 
+// Cron handler — refresh the most-expensive caches on a schedule so
+// human visits never see a cold miss. Fires per the [triggers] crons
+// in wrangler.toml. Errors are non-fatal (logged + swallowed) so a
+// transient GH API blip doesn't break the schedule.
+async function refreshCacheKey(env, ctx, key, staleSec, fetcher) {
+  try {
+    const data = await fetcher();
+    const payload = JSON.stringify({ fetchedAtMs: Date.now(), data });
+    await env.STATUS_KV.put(key, payload, { expirationTtl: Math.max(60, staleSec) });
+    console.log(`prewarm ${key}: ok`);
+  } catch (e) {
+    console.log(`prewarm ${key}: ${e?.message || e}`);
+  }
+}
+
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(Promise.all([
+      refreshCacheKey(env, ctx, 'community', 86400, () => buildCommunityMatrix(env)),
+      refreshCacheKey(env, ctx, 'forks',     300,   () => buildForks(env)),
+      refreshCacheKey(env, ctx, 'tags',      1800,  () => listEngineTags(env)),
+    ]));
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname } = url;

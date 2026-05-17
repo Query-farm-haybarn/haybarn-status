@@ -20,6 +20,14 @@ custom_domain = true
 [observability]
 enabled = true
 
+# Cron-driven cache pre-warm. Worker's `scheduled` handler refreshes
+# the heavy caches (community matrix + tag list) so human visits hit
+# warm cache 99% of the time. The community-matrix fetch costs ~20
+# GH API calls so refreshing every 2 min keeps us well under the
+# 15k/hr GH App token budget (~30 calls × 30 wakeups/hr = 900/hr).
+[triggers]
+crons = ["*/2 * * * *"]
+
 # Custom domain `haybarn-status.query.farm` is bound in the Cloudflare
 # dashboard (Workers & Pages -> haybarn-status -> Domains & Routes ->
 # Add Custom Domain), matching the haybarn-vcpkg-worker convention.

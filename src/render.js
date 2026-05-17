@@ -79,6 +79,26 @@ tr:last-child td { border-bottom: none; }
 .community-row .jobs-grid { flex: 1; gap: 4px 12px; }
 .community-row .job-cell { font-size: 11px; }
 .community-row .job-cell .dot { width: 9px; height: 9px; }
+
+/* Community matrix table — whole-cell heat-map. Each platform cell is
+   colored by its build status; the extension name and rolled-up pill
+   are in fixed left columns. */
+.community-table-wrap { overflow-x: auto; margin-top: 8px; }
+.community-table { border-collapse: separate; border-spacing: 1px; font-size: 12px; width: 100%; background: var(--border); }
+.community-table th, .community-table td { background: var(--panel); }
+.community-table thead th { position: sticky; top: 0; z-index: 1; background: var(--panel2); }
+.community-table th.plat { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; font-weight: 500; color: var(--muted); padding: 8px 4px; height: 92px; vertical-align: bottom; width: 18px; min-width: 18px; }
+.community-table th.ext-head { text-align: left; padding: 6px 8px; font-weight: 500; color: var(--muted); }
+.community-table td.ext { text-align: left; padding: 2px 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.community-table td.row-pill { padding: 2px 8px; }
+.community-table td.row-pill .pill { font-size: 10px; padding: 1px 6px; }
+.community-table td.cell { width: 18px; min-width: 18px; padding: 0; height: 18px; }
+.community-table td.cell.success { background: var(--ok); }
+.community-table td.cell.failure, .community-table td.cell.timed_out { background: var(--fail); }
+.community-table td.cell.in_progress, .community-table td.cell.queued, .community-table td.cell.waiting, .community-table td.cell.pending, .community-table td.cell.requested { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+.community-table td.cell.cancelled, .community-table td.cell.skipped, .community-table td.cell.neutral { background: var(--grey); }
+.community-table td.cell.empty { background: var(--panel); color: var(--muted); text-align: center; font-size: 10px; line-height: 18px; }
+.community-table tbody tr:hover td.ext, .community-table tbody tr:hover td.row-pill { background: var(--panel2); }
 .title-bar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
 .title-bar h2 { margin: 0; }
 .run-link { color: var(--muted); font-size: 12px; }
@@ -260,6 +280,30 @@ function renderCommunityJobCell(j) {
   return `<div class="job-cell" title="${escapeHtml(j.name)} — ${escapeHtml(s.replace('_', ' '))}"><span class="dot ${cls}"></span>${nameTag}</div>`;
 }
 
+// Canonical ordering for the community matrix's platform columns. The
+// renderer discovers actual platforms from the data and keeps any that
+// don't fit this list at the end (sorted alphabetically) — so unfamiliar
+// platforms surface without code changes.
+const PLATFORM_COLUMN_ORDER = [
+  'linux_amd64',
+  'linux_arm64',
+  'linux_amd64_musl',
+  'linux_arm64_musl',
+  'osx_amd64',
+  'osx_arm64',
+  'windows_amd64',
+  'windows_amd64_mingw',
+  'wasm_eh',
+  'wasm_mvp',
+  'wasm_threads',
+];
+
+function dotClassForStatusKey(s) {
+  return ['success', 'failure', 'timed_out', 'in_progress', 'queued',
+          'waiting', 'requested', 'pending', 'cancelled', 'skipped',
+          'neutral'].includes(s) ? s : '';
+}
+
 function renderCommunitySection(c) {
   if (!c) return '';
   if (c.error) {
@@ -269,45 +313,75 @@ function renderCommunitySection(c) {
   const exts = c.extensions || [];
   if (!exts.length) {
     return `<section class="repo"><h2>Community extensions <span class="repo-name">(not rc-pinned)</span></h2>
-      <div class="empty">no descriptor-touching runs in the last ${c.scannedRuns || 0} scanned</div></section>`;
+      <div class="empty">no extension data found</div></section>`;
   }
 
-  // Aggregate counts across all per-extension jobs.
+  // Index each extension's jobs by platform and aggregate stats in one pass.
   let okC = 0, failC = 0, ipC = 0, totalC = 0;
-  for (const ext of exts) {
+  const seenPlatforms = new Set();
+  const indexed = exts.map(ext => {
+    const byPlat = new Map();
     for (const j of (ext.jobs || [])) {
+      const plat = parseCommunityJob(j.name).platform;
+      if (!plat) continue;
+      seenPlatforms.add(plat);
+      byPlat.set(plat, j);
       totalC++;
       const s = statusKey(j);
       if (s === 'success') okC++;
       else if (s === 'failure' || s === 'timed_out') failC++;
       else if (s === 'in_progress' || s === 'queued' || s === 'pending' || s === 'waiting') ipC++;
     }
-  }
+    return { ...ext, byPlat };
+  });
 
-  const rows = exts.map(ext => {
-    const cells = (ext.jobs || []).map(j => ({ ...j, _platform: parseCommunityJob(j.name).platform }));
-    const cellsHtml = cells.length
-      ? `<div class="jobs-grid">${cells.map(renderCommunityJobCell).join('')}</div>`
-      : `<span class="empty" style="font-size:12px">no jobs (run still spinning up)</span>`;
-    return `<div class="community-row">
-      <a class="community-ext" href="${escapeHtml(ext.run.htmlUrl)}" title="${escapeHtml(ext.name)} — run #${ext.run.runNumber}">${escapeHtml(ext.name)}</a>
-      ${pillFor(ext.run)}
-      ${cellsHtml}
-    </div>`;
-  }).join('');
+  // Order the column list: canonical ones first (in order), then anything
+  // unfamiliar alphabetically.
+  const known = PLATFORM_COLUMN_ORDER.filter(p => seenPlatforms.has(p));
+  const extras = [...seenPlatforms].filter(p => !PLATFORM_COLUMN_ORDER.includes(p)).sort();
+  const columns = [...known, ...extras];
+
+  const sourceLink = c.sourceRunUrl
+    ? `<a class="run-link" href="${escapeHtml(c.sourceRunUrl)}">build_all run</a>`
+    : '';
+
+  const head = `<thead><tr>
+      <th class="ext-head">Extension</th>
+      <th class="ext-head">Status</th>
+      ${columns.map(p => `<th class="plat">${escapeHtml(p)}</th>`).join('')}
+    </tr></thead>`;
+
+  // Per-cell HTML kept tight: a single <td> with the status class and a
+  // short title= attribute for hover. 242 extensions × ~11 columns means
+  // ~2700 cells — each saved byte cuts ~3KB off the served page. The
+  // extension name in column 1 still links to its full job list.
+  const body = `<tbody>${indexed.map(ext => {
+    const cells = columns.map(p => {
+      const j = ext.byPlat.get(p);
+      if (!j) return `<td class="cell empty">·</td>`;
+      const s = statusKey(j);
+      const cls = dotClassForStatusKey(s);
+      // Title omits the extension name (already in the row) — just plat+status.
+      return `<td class="cell dot ${cls}" title="${escapeHtml(p)}: ${escapeHtml(s.replace('_', ' '))}"></td>`;
+    }).join('');
+    return `<tr><td class="ext"><a href="${escapeHtml(ext.run.htmlUrl)}">${escapeHtml(ext.name)}</a></td><td class="row-pill">${pillFor(ext.run)}</td>${cells}</tr>`;
+  }).join('')}</tbody>`;
 
   return `<section class="repo">
     <div class="title-bar">
-      <h2>Community extensions <span class="repo-name">— latest run per descriptor, scanned ${c.scannedRuns} runs${c.skippedBulkRuns ? ` (${c.skippedBulkRuns} bulk-edit runs skipped)` : ''}</span></h2>
+      <h2>Community extensions <span class="repo-name">— ${exts.length} extensions, ${totalC} platform legs${sourceLink ? ' · ' : ''}${sourceLink}</span></h2>
       <span class="counts">
-        <span>${exts.length} extension${exts.length === 1 ? '' : 's'}</span>
-        <span>${totalC} legs</span>
         <span class="ok">✓ ${okC}</span>
         <span class="bad">✗ ${failC}</span>
         ${ipC ? `<span>⟳ ${ipC}</span>` : ''}
       </span>
     </div>
-    ${rows}
+    <div class="community-table-wrap">
+      <table class="community-table">
+        ${head}
+        ${body}
+      </table>
+    </div>
   </section>`;
 }
 

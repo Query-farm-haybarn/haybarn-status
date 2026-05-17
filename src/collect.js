@@ -31,15 +31,30 @@ function needsJobs(run) {
 }
 
 async function fetchRunJobs(env, owner, repo, runId, maxPages = 1) {
-  const all = [];
-  for (let page = 1; page <= maxPages; page++) {
-    const url = `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100&filter=latest&page=${page}`;
-    const data = await ghFetch(env, url);
-    const jobs = data.jobs || [];
-    all.push(...jobs);
-    if (jobs.length < 100) break;
-  }
-  return all;
+  const PER_PAGE = 100;
+  const first = await ghFetch(
+    env,
+    `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=${PER_PAGE}&filter=latest&page=1`,
+  );
+  const firstJobs = first.jobs || [];
+  const total = first.total_count || firstJobs.length;
+  if (maxPages === 1 || firstJobs.length < PER_PAGE) return firstJobs;
+
+  const pagesNeeded = Math.min(maxPages, Math.ceil(total / PER_PAGE));
+  if (pagesNeeded <= 1) return firstJobs;
+
+  // Parallel-fetch the remaining pages — pagination is otherwise the
+  // slowest leg of the community matrix render (build_all has ~22 pages
+  // of jobs; sequential = ~5–10s of cold latency, parallel = ~1s).
+  const rest = await Promise.all(
+    Array.from({ length: pagesNeeded - 1 }, (_, i) =>
+      ghFetch(
+        env,
+        `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=${PER_PAGE}&filter=latest&page=${i + 2}`,
+      ).then(d => d.jobs || []),
+    ),
+  );
+  return [firstJobs, ...rest].flat();
 }
 
 async function fetchRepoRunsForTag(env, repo, tag) {
