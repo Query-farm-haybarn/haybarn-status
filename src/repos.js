@@ -17,6 +17,7 @@ export const FORK_EXT_REPOS = [
 export const COMMUNITY_REPO = {
   repo: 'haybarn-community-extensions',
   workflowFile: 'build.yml',
+  buildAllWorkflowFile: 'build_all.yml',
   branch: 'main',
 };
 

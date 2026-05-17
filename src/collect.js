@@ -132,18 +132,129 @@ async function commitSingleExtension(env, sha) {
   }
 }
 
+// build_all.yml fans out 240+ per-extension builds via workflow_call
+// (matrix on the descriptor list). These don't appear as separate
+// workflow_runs of build.yml — they're nested JOBS inside the one
+// build_all run, named like:
+//   "build_all (h3) / build / Linux (linux_amd64, ...)"
+//   "build_all (h3) / prepare"
+//   "build_all (chess) / ..."
+// We detect that pattern and pull the extension name out of the parens.
+const BUILD_ALL_NAME_RE = /^build_all\s*\(([\w.-]+)\)\s*\/\s*(.+)$/;
+
+function parseBuildAllJobName(name) {
+  const m = name.match(BUILD_ALL_NAME_RE);
+  if (!m) return null;
+  return { extension: m[1], inner: m[2] };
+}
+
+// Pull the latest run of build_all.yml (the bulk fan-out workflow) and
+// derive a per-extension matrix from its job list. Used in preference to
+// the per-workflow-run scan when a recent build_all exists — that one
+// run captures every extension being built across the catalog, whereas
+// the per-run scan can only see the most recent ~100 direct invocations
+// of build.yml (which excludes workflow_call children of build_all).
+async function buildMatrixFromBuildAll(env) {
+  // Latest build_all run on main.
+  const listPath = `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.buildAllWorkflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=1`;
+  const data = await ghFetch(env, listPath);
+  const run = (data.workflow_runs || [])[0];
+  if (!run) return null;
+
+  // 240 extensions × ~9 jobs each = ~2200 jobs. Paginate generously.
+  // GH caps per_page at 100; we'll pull up to 30 pages = 3000 jobs.
+  const allJobs = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 30);
+
+  const byExt = new Map();
+  let nonMatching = 0;
+  for (const j of allJobs) {
+    const parsed = parseBuildAllJobName(j.name);
+    if (!parsed) { nonMatching++; continue; }
+    if (!byExt.has(parsed.extension)) byExt.set(parsed.extension, []);
+    // Reshape: synthesize a job entry whose `name` retains the inner part,
+    // so the existing renderer's parseCommunityJob() can pull a platform
+    // label out of the "Linux (linux_amd64, ...)" parens just like before.
+    byExt.get(parsed.extension).push({
+      name: parsed.inner,
+      status: j.status,
+      conclusion: j.conclusion,
+      html_url: j.html_url,
+    });
+  }
+
+  // Compute per-extension rolled-up status (worst-case): failure > in_progress
+  // > queued > success.
+  const STATUS_RANK = {
+    failure: 5, cancelled: 4, timed_out: 4,
+    in_progress: 3, queued: 3, waiting: 3, pending: 3,
+    success: 1, skipped: 0, neutral: 0,
+  };
+
+  const extensions = [...byExt.entries()].map(([name, rawJobs]) => {
+    // Keep only matrix jobs (those with a paren, i.e. platform-leg jobs).
+    // Drop control jobs like "prepare" + "build / Generate matrix" so the
+    // matrix grid stays clean.
+    const matrixJobs = rawJobs.filter(j => /\(/.test(j.name)).map(summarizeJob);
+
+    // Roll up the worst-case status across all this extension's jobs
+    // (matrix + control) so the row's pill reflects reality even if
+    // control jobs fail.
+    let worst = { status: 'completed', conclusion: 'success' };
+    for (const j of rawJobs) {
+      const cur = j.status === 'completed' ? (j.conclusion || 'neutral') : (j.status || 'unknown');
+      const next = worst.status === 'completed' ? (worst.conclusion || 'neutral') : worst.status;
+      if ((STATUS_RANK[cur] || 2) > (STATUS_RANK[next] || 2)) {
+        worst = { status: j.status, conclusion: j.conclusion };
+      }
+    }
+
+    return {
+      name,
+      run: {
+        ...summarizeRun(run, null),
+        status: worst.status,
+        conclusion: worst.conclusion,
+      },
+      jobs: matrixJobs,
+    };
+  });
+
+  extensions.sort((a, b) => a.name.localeCompare(b.name));
+
+  return {
+    fetchedAt: new Date().toISOString(),
+    scannedRuns: 1,
+    sourceRunId: run.id,
+    sourceRunUrl: run.html_url,
+    extensions,
+    totalJobs: allJobs.length,
+    nonMatchingJobs: nonMatching,
+    _disclaimer: DISCLAIMER,
+  };
+}
+
 // Scan the most recent N community runs to build a per-extension status matrix.
-// Extension-name resolution order, per-run:
-//   1. display_title ("🐤 <name>") — set by build.yml's run-name expression
-//      when extension_name comes in as a workflow input. Covers build_all
-//      fan-outs and manual workflow_dispatch invocations. No API cost.
-//   2. head_commit's changed files — for push-triggered builds where a
-//      single descriptor was edited. Requires a /commits/{sha} call per
-//      unique sha (deduped). Skipped for bulk-import commits.
+// Strategy:
+//   1. If a recent build_all run exists with substantive job count, use it —
+//      one run gives us EVERY extension being built across the catalog.
+//   2. Otherwise fall back to scanning recent direct build.yml runs, with
+//      extension-name resolution from display_title or commit file-diff.
 //
 // For each identified extension we keep the run with the highest run_number
 // and fetch its jobs to expose the platform-leg matrix.
 export async function buildCommunityMatrix(env, { perPage = 100 } = {}) {
+  // Prefer build_all source when it has substantive data: that single
+  // workflow run captures every extension built across the catalog.
+  try {
+    const fromBuildAll = await buildMatrixFromBuildAll(env);
+    if (fromBuildAll && fromBuildAll.extensions.length >= 5) {
+      return fromBuildAll;
+    }
+  } catch (e) {
+    // Fall through to per-run scan on any error.
+    console.log('buildMatrixFromBuildAll fallback:', e?.message || e);
+  }
+
   let runs = [];
   try {
     const data = await ghFetch(
