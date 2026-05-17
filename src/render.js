@@ -87,7 +87,7 @@ tr:last-child td { border-bottom: none; }
 .community-table { border-collapse: separate; border-spacing: 1px; font-size: 12px; width: 100%; background: var(--border); }
 .community-table th, .community-table td { background: var(--panel); }
 .community-table thead th { position: sticky; top: 0; z-index: 1; background: var(--panel2); }
-.community-table th.plat { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; font-weight: 500; color: var(--muted); padding: 8px 4px; height: 92px; vertical-align: bottom; width: 18px; min-width: 18px; }
+.community-table th.plat { writing-mode: vertical-rl; white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; font-weight: 500; color: var(--muted); padding: 6px 4px; height: 96px; vertical-align: top; width: 18px; min-width: 18px; text-align: left; }
 .community-table th.ext-head { text-align: left; padding: 6px 8px; font-weight: 500; color: var(--muted); }
 .community-table td.ext { text-align: left; padding: 2px 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .community-table td.row-pill { padding: 2px 8px; }
