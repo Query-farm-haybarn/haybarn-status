@@ -1,4 +1,7 @@
-import { buildRcView, buildForks, buildCommunityMatrix, listEngineTags } from './collect.js';
+import {
+  buildRcView, buildForks, buildCommunityMatrix, listEngineTags,
+  buildRegistryPresence,
+} from './collect.js';
 import { renderIndex, renderRcPage, renderError } from './render.js';
 import { DISCLAIMER, TAG_PREFIX } from './repos.js';
 
@@ -67,6 +70,22 @@ async function handleRcPage(env, ctx, tag, asJson) {
     // A scheduled() handler below also pre-warms on a cron.
     getCached(env, ctx, 'community', 60, 86400, () => buildCommunityMatrix(env)),
   ]);
+
+  // Registry-presence is the second-most-expensive (240+ HTTPS GETs to
+  // npm + PyPI). Cache aggressively + only refresh on the cron, never
+  // synchronously on a page load. If the cache is empty, we just don't
+  // show registry pills until the first cron tick. Page renders fine
+  // without them.
+  let registryPresence = null;
+  try {
+    const cached = await env.STATUS_KV.get('registry-presence', { type: 'json' });
+    if (cached && cached.data) registryPresence = cached.data;
+  } catch (_) {}
+  if (registryPresence) {
+    // Fold into the community matrix so the renderer can decorate rows.
+    community.registries = registryPresence;
+  }
+
   const merged = { ...view, sidePanel: { forks: forks.forks, community } };
   return asJson ? json(merged) : html(renderRcPage(merged));
 }
@@ -97,6 +116,25 @@ export default {
       refreshCacheKey(env, ctx, 'community', 86400, () => buildCommunityMatrix(env)),
       refreshCacheKey(env, ctx, 'forks',     300,   () => buildForks(env)),
       refreshCacheKey(env, ctx, 'tags',      1800,  () => listEngineTags(env)),
+      // Registry presence is bigger than the others (~480 outbound
+      // GETs against npm + PyPI) so we run it after the community
+      // matrix is hot — it reads back the extension list from the
+      // matrix it just refreshed, avoiding a duplicate GH fetch.
+      (async () => {
+        try {
+          const cm = await env.STATUS_KV.get('community', { type: 'json' });
+          const exts = (cm && cm.data && cm.data.extensions) || [];
+          const names = exts.map(e => e.name).filter(Boolean);
+          if (names.length) {
+            await refreshCacheKey(env, ctx, 'registry-presence', 86400,
+              () => buildRegistryPresence(env, names));
+          } else {
+            console.log('prewarm registry-presence: no extensions in matrix');
+          }
+        } catch (e) {
+          console.log('prewarm registry-presence:', e?.message || e);
+        }
+      })(),
     ]));
   },
 

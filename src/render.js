@@ -98,7 +98,16 @@ tr:last-child td { border-bottom: none; }
 .community-table td.cell.in_progress, .community-table td.cell.queued, .community-table td.cell.waiting, .community-table td.cell.pending, .community-table td.cell.requested { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
 .community-table td.cell.cancelled, .community-table td.cell.skipped, .community-table td.cell.neutral { background: var(--grey); }
 .community-table td.cell.empty { background: var(--panel); color: var(--muted); text-align: center; font-size: 10px; line-height: 18px; }
-.community-table tbody tr:hover td.ext, .community-table tbody tr:hover td.row-pill { background: var(--panel2); }
+.community-table tbody tr:hover td.ext, .community-table tbody tr:hover td.row-pill, .community-table tbody tr:hover td.registry { background: var(--panel2); }
+/* Registry-presence + issue columns sit at the right end of each row.
+   A small badge for each of npm / PyPI / filed-issue; click-throughs to
+   the live registry page or upstream tracker. */
+.community-table td.registry { width: 18px; min-width: 18px; padding: 0; height: 18px; text-align: center; font-size: 11px; line-height: 18px; }
+.community-table td.registry a { color: inherit; text-decoration: none; display: block; height: 100%; width: 100%; }
+.community-table td.registry.has { background: var(--ok); color: #fff; font-weight: 600; }
+.community-table td.registry.miss { background: var(--panel); color: var(--muted); }
+.community-table td.registry.warn { background: var(--warn); color: #fff; font-weight: 600; }
+.community-table th.registry-head { writing-mode: vertical-rl; white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; font-weight: 500; color: var(--muted); padding: 6px 4px; height: 96px; vertical-align: top; width: 18px; min-width: 18px; text-align: left; }
 .title-bar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
 .title-bar h2 { margin: 0; }
 .run-link { color: var(--muted); font-size: 12px; }
@@ -345,11 +354,37 @@ function renderCommunitySection(c) {
     ? `<a class="run-link" href="${escapeHtml(c.sourceRunUrl)}">build_all run</a>`
     : '';
 
+  // Per-extension registry presence (npm, PyPI) and upstream-tracker
+  // markers. May be undefined when the cron hasn't pre-warmed yet — in
+  // which case we render the columns greyed out.
+  const reg = (c && c.registries) || null;
+  const presence = reg ? (reg.presence || {}) : {};
+  const knownIssues = reg ? (reg.knownIssues || {}) : {};
+
   const head = `<thead><tr>
       <th class="ext-head">Extension</th>
       <th class="ext-head">Status</th>
       ${columns.map(p => `<th class="plat">${escapeHtml(p)}</th>`).join('')}
+      <th class="registry-head">npm</th>
+      <th class="registry-head">PyPI</th>
+      <th class="registry-head">issue</th>
     </tr></thead>`;
+
+  function registryCell(info, kind) {
+    // info: { exists, latest, url } | null/undefined
+    if (!info) return `<td class="registry miss" title="${kind}: unknown / not yet probed">·</td>`;
+    if (!info.exists) return `<td class="registry miss" title="${kind}: not published">·</td>`;
+    const v = info.latest || '(no version)';
+    const label = kind === 'npm' ? 'n' : 'p';
+    return `<td class="registry has" title="${kind} ${escapeHtml(v)}"><a href="${escapeHtml(info.url || '#')}" rel="noopener" target="_blank">${label}</a></td>`;
+  }
+
+  function issueCell(extName) {
+    const i = knownIssues[extName];
+    if (!i) return `<td class="registry miss" title="no filed upstream issue">·</td>`;
+    if (!i.url) return `<td class="registry warn" title="${escapeHtml(i.why || 'tracker noted, no URL')}">!</td>`;
+    return `<td class="registry warn" title="${escapeHtml(i.why || 'upstream issue filed')}"><a href="${escapeHtml(i.url)}" rel="noopener" target="_blank">!</a></td>`;
+  }
 
   // Per-cell HTML kept tight: a single <td> with the status class and a
   // short title= attribute for hover. 242 extensions × ~11 columns means
@@ -364,7 +399,11 @@ function renderCommunitySection(c) {
       // Title omits the extension name (already in the row) — just plat+status.
       return `<td class="cell dot ${cls}" title="${escapeHtml(p)}: ${escapeHtml(s.replace('_', ' '))}"></td>`;
     }).join('');
-    return `<tr><td class="ext"><a href="${escapeHtml(ext.run.htmlUrl)}">${escapeHtml(ext.name)}</a></td><td class="row-pill">${pillFor(ext.run)}</td>${cells}</tr>`;
+    const extPresence = presence[ext.name] || {};
+    const regCells = registryCell(extPresence.npm, 'npm')
+                   + registryCell(extPresence.pypi, 'PyPI')
+                   + issueCell(ext.name);
+    return `<tr><td class="ext"><a href="${escapeHtml(ext.run.htmlUrl)}">${escapeHtml(ext.name)}</a></td><td class="row-pill">${pillFor(ext.run)}</td>${cells}${regCells}</tr>`;
   }).join('')}</tbody>`;
 
   return `<section class="repo">

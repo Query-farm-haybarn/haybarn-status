@@ -2,6 +2,7 @@ import { ghFetch } from './gh.js';
 import {
   ORG, TAG_FIRED_REPOS, FORK_EXT_REPOS, COMMUNITY_REPO,
   TAG_PREFIX, TAG_REF_PATH, DISCLAIMER,
+  npmName, pypiName, KNOWN_UPSTREAM_ISSUES,
 } from './repos.js';
 
 function summarizeJob(j) {
@@ -257,6 +258,86 @@ async function buildMatrixFromBuildAll(env) {
 //
 // For each identified extension we keep the run with the highest run_number
 // and fetch its jobs to expose the platform-leg matrix.
+// ---------------------------------------------------------------------------
+// Registry presence — does `haybarn-ext-<ext>-h<hv>` exist on npm/PyPI?
+//
+// Lookup is one GET per (ext, registry); the workers-fetch implementation
+// follows redirects + caches at the edge automatically. 240 extensions ×
+// 2 registries = ~480 subrequests per refresh — fine on paid Worker
+// plans (1000 limit) but we batch in waves of 32 to keep the fetch
+// queue from saturating outbound connections.
+// ---------------------------------------------------------------------------
+
+const NPM_REGISTRY = 'https://registry.npmjs.org';
+const PYPI_REGISTRY = 'https://pypi.org';
+
+function npmPath(name) {
+  // npm accepts both `@scope/name` and `@scope%2Fname`; the encoded
+  // form is friendlier to URL parsers in proxies.
+  return name.replace('/', '%2F');
+}
+
+async function _probeNpm(name) {
+  try {
+    const r = await fetch(`${NPM_REGISTRY}/${npmPath(name)}`, {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+    });
+    if (r.status === 404) return { exists: false };
+    if (!r.ok) return { exists: false, error: `npm ${r.status}` };
+    const d = await r.json();
+    return {
+      exists: true,
+      latest: (d['dist-tags'] || {}).latest || null,
+      url: `https://www.npmjs.com/package/${name}`,
+    };
+  } catch (e) {
+    return { exists: false, error: `npm ${e && e.message ? e.message : 'fetch'}` };
+  }
+}
+
+async function _probePypi(name) {
+  try {
+    const r = await fetch(`${PYPI_REGISTRY}/pypi/${encodeURIComponent(name)}/json`, {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+    });
+    if (r.status === 404) return { exists: false };
+    if (!r.ok) return { exists: false, error: `pypi ${r.status}` };
+    const d = await r.json();
+    return {
+      exists: true,
+      latest: (d.info || {}).version || null,
+      url: `https://pypi.org/project/${name}/`,
+    };
+  } catch (e) {
+    return { exists: false, error: `pypi ${e && e.message ? e.message : 'fetch'}` };
+  }
+}
+
+export async function buildRegistryPresence(env, extensionNames) {
+  const out = {};
+  const BATCH = 32;
+  for (let i = 0; i < extensionNames.length; i += BATCH) {
+    const slice = extensionNames.slice(i, i + BATCH);
+    const results = await Promise.all(slice.map(async (ext) => {
+      const [npm, pypi] = await Promise.all([
+        _probeNpm(npmName(ext)),
+        _probePypi(pypiName(ext)),
+      ]);
+      return [ext, { npm, pypi }];
+    }));
+    for (const [ext, r] of results) out[ext] = r;
+  }
+  return {
+    fetchedAt: new Date().toISOString(),
+    extensionsProbed: extensionNames.length,
+    presence: out,
+    knownIssues: KNOWN_UPSTREAM_ISSUES,
+    _disclaimer: DISCLAIMER,
+  };
+}
+
 export async function buildCommunityMatrix(env, { perPage = 100 } = {}) {
   // Prefer build_all source when it has substantive data: that single
   // workflow run captures every extension built across the catalog.
