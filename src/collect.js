@@ -31,7 +31,7 @@ function needsJobs(run) {
   return run.status !== 'completed' || run.conclusion === 'failure';
 }
 
-async function fetchRunJobs(env, owner, repo, runId, maxPages = 1) {
+async function fetchRunJobsUncached(env, owner, repo, runId, maxPages = 1) {
   const PER_PAGE = 100;
   const first = await ghFetch(
     env,
@@ -58,12 +58,40 @@ async function fetchRunJobs(env, owner, repo, runId, maxPages = 1) {
   return [firstJobs, ...rest].flat();
 }
 
+// Wraps fetchRunJobsUncached with a per-run KV cache. Once a run reaches
+// a terminal conclusion (success/failure/cancelled/etc.) its job list
+// never changes, so we cache it indefinitely. In-progress runs aren't
+// cached — they need fresh data every refresh. This single change cuts
+// our GH API draw by ~90% on a steady-state catalog where most runs
+// are long-since completed.
+async function fetchRunJobs(env, owner, repo, runId, maxPages = 1, runConclusion = null) {
+  const cacheKey = `jobs:${owner}/${repo}:${runId}`;
+  if (runConclusion && runConclusion !== 'in_progress' && runConclusion !== 'queued') {
+    try {
+      const cached = await env.STATUS_KV.get(cacheKey, { type: 'json' });
+      if (cached && Array.isArray(cached.jobs)) return cached.jobs;
+    } catch (_) { /* fall through to fresh fetch */ }
+  }
+  const jobs = await fetchRunJobsUncached(env, owner, repo, runId, maxPages);
+  // Only cache terminal runs — in-progress jobs change as they advance.
+  if (runConclusion && runConclusion !== 'in_progress' && runConclusion !== 'queued') {
+    try {
+      // 7 days — completed runs are immutable; GH retains them ~90 days
+      // but a 7-day KV TTL is plenty for our refresh cadence.
+      await env.STATUS_KV.put(
+        cacheKey, JSON.stringify({ jobs }), { expirationTtl: 7 * 86400 },
+      );
+    } catch (_) { /* non-fatal */ }
+  }
+  return jobs;
+}
+
 async function fetchRepoRunsForTag(env, repo, tag) {
   const path = `/repos/${ORG}/${repo}/actions/runs?branch=${encodeURIComponent(tag)}&per_page=20`;
   const data = await ghFetch(env, path);
   const runs = data.workflow_runs || [];
   const enriched = await Promise.all(runs.map(async r => {
-    const jobs = needsJobs(r) ? await fetchRunJobs(env, ORG, repo, r.id) : null;
+    const jobs = needsJobs(r) ? await fetchRunJobs(env, ORG, repo, r.id, 1, r.conclusion) : null;
     return summarizeRun(r, jobs);
   }));
   return enriched;
@@ -184,7 +212,7 @@ async function buildMatrixFromBuildAll(env) {
 
   // 240 extensions × ~9 jobs each = ~2200 jobs. Paginate generously.
   // GH caps per_page at 100; we'll pull up to 30 pages = 3000 jobs.
-  const allJobs = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 30);
+  const allJobs = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 30, run.conclusion);
 
   const byExt = new Map();
   let nonMatching = 0;
@@ -360,7 +388,7 @@ async function listRecentCommunityRuns(env, { pages = 5, perPage = 100 } = {}) {
   return results.flat();
 }
 
-export async function buildCommunityMatrix(env, { perPage = 100, pages = 5 } = {}) {
+export async function buildCommunityMatrix(env, { perPage = 100, pages = 2 } = {}) {
   // Prefer build_all source when it has substantive data: that single
   // workflow run captures every extension built across the catalog.
   let buildAllMatrix = null;
@@ -430,7 +458,7 @@ export async function buildCommunityMatrix(env, { perPage = 100, pages = 5 } = {
   const extensions = await Promise.all([...byExt.entries()].map(async ([name, run]) => {
     let jobs = [];
     try {
-      const all = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 1);
+      const all = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 1, run.conclusion);
       jobs = all.filter(j => /\(/.test(j.name)).map(summarizeJob);
     } catch (_) { /* leave jobs empty */ }
     return { name, run: summarizeRun(run, null), jobs };

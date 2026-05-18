@@ -22,11 +22,22 @@ enabled = true
 
 # Cron-driven cache pre-warm. Worker's `scheduled` handler refreshes
 # the heavy caches (community matrix + tag list) so human visits hit
-# warm cache 99% of the time. The community-matrix fetch costs ~20
-# GH API calls so refreshing every 2 min keeps us well under the
-# 15k/hr GH App token budget (~30 calls × 30 wakeups/hr = 900/hr).
+# warm cache 99% of the time.
+#
+# Cadence history:
+#   v1: */2 — 2 min. Sustainable when community matrix was 20 calls.
+#   v2 (current): */15 — once the 244-extension catalog landed, the
+#   community matrix paginates build.yml runs AND per-extension job
+#   lists. With 244 unique extensions each forcing a job-list fetch,
+#   a cold refresh costs ~250 GH calls. At 2-min cadence that's
+#   ~7500/hr — close to the 15k installation-token budget, leaving
+#   no headroom for rc page views (and we hit 403s in practice).
+#   The companion per-run KV job cache in collect.js means subsequent
+#   refreshes only fetch jobs for in-progress runs, so once warm the
+#   cost drops back to ~10-30/refresh. */15 is plenty for a status
+#   page where data doesn't change second-by-second.
 [triggers]
-crons = ["*/2 * * * *"]
+crons = ["*/15 * * * *"]
 
 # Custom domain `haybarn-status.query.farm` is bound in the Cloudflare
 # dashboard (Workers & Pages -> haybarn-status -> Domains & Routes ->
