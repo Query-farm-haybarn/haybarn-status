@@ -171,10 +171,15 @@ function parseBuildAllJobName(name) {
 // the per-run scan can only see the most recent ~100 direct invocations
 // of build.yml (which excludes workflow_call children of build_all).
 async function buildMatrixFromBuildAll(env) {
-  // Latest build_all run on main.
-  const listPath = `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.buildAllWorkflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=1`;
+  // Pick the most recent build_all that wasn't cancelled. A cancelled
+  // run only has the subset of extensions whose matrix legs got
+  // scheduled before cancellation — using it would mean the status
+  // page only shows that subset (the bug surfaced as "only 92
+  // extensions starting at 'oast'" while 240+ were expected).
+  const listPath = `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.buildAllWorkflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=20`;
   const data = await ghFetch(env, listPath);
-  const run = (data.workflow_runs || [])[0];
+  const allRuns = data.workflow_runs || [];
+  const run = allRuns.find(r => r.conclusion !== 'cancelled') || null;
   if (!run) return null;
 
   // 240 extensions × ~9 jobs each = ~2200 jobs. Paginate generously.
@@ -338,28 +343,54 @@ export async function buildRegistryPresence(env, extensionNames) {
   };
 }
 
-export async function buildCommunityMatrix(env, { perPage = 100 } = {}) {
+// Paginate the build.yml run list across `pages` pages of `perPage` each
+// (default 5 × 100 = 500 most-recent runs). Returns the merged list. We
+// need this much depth because the catalog has ~244 extensions and each
+// can have multiple recent runs (push + workflow_dispatch + retries) —
+// the first 100 runs don't necessarily cover every extension name.
+async function listRecentCommunityRuns(env, { pages = 5, perPage = 100 } = {}) {
+  const base = `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.workflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=${perPage}`;
+  const results = await Promise.all(
+    Array.from({ length: pages }, (_, i) =>
+      ghFetch(env, `${base}&page=${i + 1}`)
+        .then(d => d.workflow_runs || [])
+        .catch(() => []),
+    ),
+  );
+  return results.flat();
+}
+
+export async function buildCommunityMatrix(env, { perPage = 100, pages = 5 } = {}) {
   // Prefer build_all source when it has substantive data: that single
   // workflow run captures every extension built across the catalog.
+  let buildAllMatrix = null;
   try {
-    const fromBuildAll = await buildMatrixFromBuildAll(env);
-    if (fromBuildAll && fromBuildAll.extensions.length >= 5) {
-      return fromBuildAll;
-    }
+    buildAllMatrix = await buildMatrixFromBuildAll(env);
   } catch (e) {
-    // Fall through to per-run scan on any error.
     console.log('buildMatrixFromBuildAll fallback:', e?.message || e);
   }
 
+  // Also scan recent build.yml runs (paginated) so we catch all the
+  // per-extension dispatches that happened outside any build_all run.
+  // The two sources are MERGED: build_all matrix entries take
+  // precedence (they carry the full per-platform job grid), but
+  // build.yml runs fill in extensions that build_all didn't include
+  // or that were dispatched independently afterwards.
   let runs = [];
   try {
-    const data = await ghFetch(
-      env,
-      `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.workflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=${perPage}`,
-    );
-    runs = data.workflow_runs || [];
+    runs = await listRecentCommunityRuns(env, { pages, perPage });
   } catch (e) {
-    return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], error: String(e.message || e), _disclaimer: DISCLAIMER };
+    if (!buildAllMatrix) {
+      return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], error: String(e.message || e), _disclaimer: DISCLAIMER };
+    }
+  }
+  // If we got nothing from build.yml AND build_all had data, return that.
+  if (runs.length === 0 && buildAllMatrix) {
+    return buildAllMatrix;
+  }
+  // If both empty, surface an empty matrix rather than 500.
+  if (runs.length === 0 && !buildAllMatrix) {
+    return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], _disclaimer: DISCLAIMER };
   }
 
   // Pass 1: try display_title (free, no API call). Mark which runs still
@@ -405,11 +436,22 @@ export async function buildCommunityMatrix(env, { perPage = 100 } = {}) {
     return { name, run: summarizeRun(run, null), jobs };
   }));
 
+  // Merge in any build_all entries we didn't already see from build.yml.
+  // This guarantees that extensions only built via build_all (no recent
+  // standalone dispatch) still show up in the matrix.
+  if (buildAllMatrix && buildAllMatrix.extensions) {
+    const have = new Set(extensions.map(e => e.name));
+    for (const ext of buildAllMatrix.extensions) {
+      if (!have.has(ext.name)) extensions.push(ext);
+    }
+  }
+
   extensions.sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     fetchedAt: new Date().toISOString(),
     scannedRuns: runs.length,
+    scannedBuildAllExtensions: buildAllMatrix ? buildAllMatrix.extensions.length : 0,
     skippedBulkRuns: skippedBulk,
     extensions,
     _disclaimer: DISCLAIMER,
