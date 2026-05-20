@@ -464,14 +464,15 @@ export async function buildCoreCatalog(env, version = DEFAULT_VERSION) {
   };
 }
 
-// Every recent per-extension build.yml run on the community repo, straight
-// from the DO (webhook feed). Path-filtered server-side via runsForWorkflow,
-// so there's no 100-run runsForBranch ceiling — individual build.yml
-// dispatches alone now cover the full ~244-extension catalog. The DO holds the
-// full history; 300 gives comfortable headroom over the catalog size.
+// Latest build.yml run per extension on the community repo, straight from the
+// DO (webhook feed). runsForWorkflow reduces per display_title ("🐤 <ext>") in
+// SQL and applies NO row cap — so every extension's current run appears even
+// when the DO holds many runs per extension (re-dispatches + old cancelled +
+// historical). The earlier capped query showed only partial data once
+// duplicates filled the window.
 async function listRecentCommunityRuns(env) {
   return env.FEED.runsForWorkflow(
-    `${ORG}/${COMMUNITY_REPO.repo}`, COMMUNITY_REPO.branch, COMMUNITY_REPO.workflowFile, 300,
+    `${ORG}/${COMMUNITY_REPO.repo}`, COMMUNITY_REPO.branch, COMMUNITY_REPO.workflowFile,
   );
 }
 
