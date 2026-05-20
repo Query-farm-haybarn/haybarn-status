@@ -1,9 +1,12 @@
 import { ghFetch } from './gh.js';
 import {
   ORG, TAG_FIRED_REPOS, FORK_EXT_REPOS, COMMUNITY_REPO,
-  TAG_PREFIX, TAG_REF_PATH, DISCLAIMER,
+  TAG_PREFIX, TAG_REF_PATH, DISCLAIMER, DEFAULT_VERSION,
   npmName, pypiName, KNOWN_UPSTREAM_ISSUES,
+  CORE_EXTENSIONS, r2CoreBinaryUrl,
+  upstreamCommunityBinaryUrl, upstreamCoreBinaryUrl,
 } from './repos.js';
+import { enumerateCatalog } from './catalog.js';
 
 function summarizeJob(j) {
   return { name: j.name, status: j.status, conclusion: j.conclusion, htmlUrl: j.html_url };
@@ -31,67 +34,12 @@ function needsJobs(run) {
   return run.status !== 'completed' || run.conclusion === 'failure';
 }
 
-async function fetchRunJobsUncached(env, owner, repo, runId, maxPages = 1) {
-  const PER_PAGE = 100;
-  const first = await ghFetch(
-    env,
-    `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=${PER_PAGE}&filter=latest&page=1`,
-  );
-  const firstJobs = first.jobs || [];
-  const total = first.total_count || firstJobs.length;
-  if (maxPages === 1 || firstJobs.length < PER_PAGE) return firstJobs;
-
-  const pagesNeeded = Math.min(maxPages, Math.ceil(total / PER_PAGE));
-  if (pagesNeeded <= 1) return firstJobs;
-
-  // Parallel-fetch the remaining pages — pagination is otherwise the
-  // slowest leg of the community matrix render (build_all has ~22 pages
-  // of jobs; sequential = ~5–10s of cold latency, parallel = ~1s).
-  const rest = await Promise.all(
-    Array.from({ length: pagesNeeded - 1 }, (_, i) =>
-      ghFetch(
-        env,
-        `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=${PER_PAGE}&filter=latest&page=${i + 2}`,
-      ).then(d => d.jobs || []),
-    ),
-  );
-  return [firstJobs, ...rest].flat();
-}
-
-// Wraps fetchRunJobsUncached with a per-run KV cache. Once a run reaches
-// a terminal conclusion (success/failure/cancelled/etc.) its job list
-// never changes, so we cache it indefinitely. In-progress runs aren't
-// cached — they need fresh data every refresh. This single change cuts
-// our GH API draw by ~90% on a steady-state catalog where most runs
-// are long-since completed.
-async function fetchRunJobs(env, owner, repo, runId, maxPages = 1, runConclusion = null) {
-  const cacheKey = `jobs:${owner}/${repo}:${runId}`;
-  if (runConclusion && runConclusion !== 'in_progress' && runConclusion !== 'queued') {
-    try {
-      const cached = await env.STATUS_KV.get(cacheKey, { type: 'json' });
-      if (cached && Array.isArray(cached.jobs)) return cached.jobs;
-    } catch (_) { /* fall through to fresh fetch */ }
-  }
-  const jobs = await fetchRunJobsUncached(env, owner, repo, runId, maxPages);
-  // Only cache terminal runs — in-progress jobs change as they advance.
-  if (runConclusion && runConclusion !== 'in_progress' && runConclusion !== 'queued') {
-    try {
-      // 7 days — completed runs are immutable; GH retains them ~90 days
-      // but a 7-day KV TTL is plenty for our refresh cadence.
-      await env.STATUS_KV.put(
-        cacheKey, JSON.stringify({ jobs }), { expirationTtl: 7 * 86400 },
-      );
-    } catch (_) { /* non-fatal */ }
-  }
-  return jobs;
-}
-
 async function fetchRepoRunsForTag(env, repo, tag) {
-  const path = `/repos/${ORG}/${repo}/actions/runs?branch=${encodeURIComponent(tag)}&per_page=20`;
-  const data = await ghFetch(env, path);
-  const runs = data.workflow_runs || [];
+  // Live state from the webhook collector (StatusFeed), keyed on the tag as
+  // head_branch. Only runs that fired since the collector went live appear.
+  const runs = await env.FEED.runsForBranch(`${ORG}/${repo}`, tag, 20);
   const enriched = await Promise.all(runs.map(async r => {
-    const jobs = needsJobs(r) ? await fetchRunJobs(env, ORG, repo, r.id, 1, r.conclusion) : null;
+    const jobs = needsJobs(r) ? await env.FEED.jobsForRun(r.id) : null;
     return summarizeRun(r, jobs);
   }));
   return enriched;
@@ -128,11 +76,7 @@ export async function listEngineTags(env) {
 export async function buildForks(env) {
   const forks = await Promise.all(FORK_EXT_REPOS.map(async ({ repo, label }) => {
     try {
-      const data = await ghFetch(
-        env,
-        `/repos/${ORG}/${repo}/actions/runs?branch=haybarn&per_page=1`,
-      );
-      const run = (data.workflow_runs || [])[0];
+      const run = await env.FEED.latestRunForBranch(`${ORG}/${repo}`, 'haybarn');
       return { repo, label, run: run ? summarizeRun(run, null) : null, error: null };
     } catch (e) {
       return { repo, label, run: null, error: String(e.message || e) };
@@ -140,8 +84,6 @@ export async function buildForks(env) {
   }));
   return { fetchedAt: new Date().toISOString(), forks, _disclaimer: DISCLAIMER };
 }
-
-const EXT_PATH_RE = /^extensions\/([\w.-]+)\/description\.yml$/;
 
 // haybarn-community-extensions/build.yml sets its run-name to "🐤 <extname>"
 // whenever extension_name comes in via workflow_dispatch or workflow_call
@@ -153,27 +95,6 @@ function extensionFromDisplayTitle(title) {
   if (!title) return null;
   const m = title.match(DISPLAY_TITLE_RE);
   return m ? m[1] : null;
-}
-
-// Returns the single extension this commit touched, or null when the commit
-// touched zero or multiple descriptors. Multi-descriptor commits are bulk
-// import/refactor operations (e.g. sync_from_upstream landing 240 descriptors
-// in one go) — the workflow only ever builds ONE extension per run, so we
-// can't reliably attribute a multi-descriptor commit to a specific extension
-// via files alone. (Workflow_dispatch invocations DO know which extension
-// they built; we read those from display_title above, before this fallback.)
-async function commitSingleExtension(env, sha) {
-  try {
-    const commit = await ghFetch(env, `/repos/${ORG}/${COMMUNITY_REPO.repo}/commits/${sha}`);
-    const exts = new Set();
-    for (const f of commit.files || []) {
-      const m = f.filename.match(EXT_PATH_RE);
-      if (m) exts.add(m[1]);
-    }
-    return exts.size === 1 ? [...exts][0] : null;
-  } catch (_) {
-    return null;
-  }
 }
 
 // build_all.yml fans out 240+ per-extension builds via workflow_call
@@ -204,15 +125,17 @@ async function buildMatrixFromBuildAll(env) {
   // scheduled before cancellation — using it would mean the status
   // page only shows that subset (the bug surfaced as "only 92
   // extensions starting at 'oast'" while 240+ were expected).
-  const listPath = `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.buildAllWorkflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=20`;
-  const data = await ghFetch(env, listPath);
-  const allRuns = data.workflow_runs || [];
-  const run = allRuns.find(r => r.conclusion !== 'cancelled') || null;
+  const run = await env.FEED.latestRunForWorkflow(
+    `${ORG}/${COMMUNITY_REPO.repo}`,
+    COMMUNITY_REPO.buildAllWorkflowFile,
+    COMMUNITY_REPO.branch,
+    'cancelled',
+  );
   if (!run) return null;
 
-  // 240 extensions × ~9 jobs each = ~2200 jobs. Paginate generously.
-  // GH caps per_page at 100; we'll pull up to 30 pages = 3000 jobs.
-  const allJobs = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 30, run.conclusion);
+  // The feed returns every materialized job for the run (240 extensions ×
+  // ~9 jobs each ≈ 2200), no pagination needed.
+  const allJobs = await env.FEED.jobsForRun(run.id);
 
   const byExt = new Map();
   let nonMatching = 0;
@@ -348,15 +271,15 @@ async function _probePypi(name) {
   }
 }
 
-export async function buildRegistryPresence(env, extensionNames) {
+export async function buildRegistryPresence(env, extensionNames, version = DEFAULT_VERSION) {
   const out = {};
   const BATCH = 32;
   for (let i = 0; i < extensionNames.length; i += BATCH) {
     const slice = extensionNames.slice(i, i + BATCH);
     const results = await Promise.all(slice.map(async (ext) => {
       const [npm, pypi] = await Promise.all([
-        _probeNpm(npmName(ext)),
-        _probePypi(pypiName(ext)),
+        _probeNpm(npmName(ext, version)),
+        _probePypi(pypiName(ext, version)),
       ]);
       return [ext, { npm, pypi }];
     }));
@@ -364,6 +287,7 @@ export async function buildRegistryPresence(env, extensionNames) {
   }
   return {
     fetchedAt: new Date().toISOString(),
+    version,
     extensionsProbed: extensionNames.length,
     presence: out,
     knownIssues: KNOWN_UPSTREAM_ISSUES,
@@ -371,24 +295,199 @@ export async function buildRegistryPresence(env, extensionNames) {
   };
 }
 
-// Paginate the build.yml run list across `pages` pages of `perPage` each
-// (default 5 × 100 = 500 most-recent runs). Returns the merged list. We
-// need this much depth because the catalog has ~244 extensions and each
-// can have multiple recent runs (push + workflow_dispatch + retries) —
-// the first 100 runs don't necessarily cover every extension name.
-async function listRecentCommunityRuns(env, { pages = 5, perPage = 100 } = {}) {
-  const base = `/repos/${ORG}/${COMMUNITY_REPO.repo}/actions/workflows/${COMMUNITY_REPO.workflowFile}/runs?branch=${COMMUNITY_REPO.branch}&per_page=${perPage}`;
-  const results = await Promise.all(
-    Array.from({ length: pages }, (_, i) =>
-      ghFetch(env, `${base}&page=${i + 1}`)
-        .then(d => d.workflow_runs || [])
-        .catch(() => []),
-    ),
-  );
-  return results.flat();
+// ---------------------------------------------------------------------------
+// R2 presence — does the signed `.duckdb_extension.gz` actually exist on the
+// Haybarn extension bucket for this DuckDB version?
+//
+// This is the authoritative "can a user INSTALL this today" check —
+// independent of whether CI has fired recently for the extension. We probe
+// one canonical platform (linux_amd64) per extension; the build pipeline
+// publishes all 12 platforms atomically, so a single hit is a reliable
+// proxy for the others.
+// ---------------------------------------------------------------------------
+
+import { r2BinaryUrl as _r2BinaryUrl } from './repos.js';
+
+const R2_PROBE_PLATFORM = 'linux_amd64';
+
+async function _probeR2(extension, version = DEFAULT_VERSION) {
+  const url = _r2BinaryUrl(extension, R2_PROBE_PLATFORM, version);
+  try {
+    const r = await fetch(url, { method: 'HEAD' });
+    if (r.status === 404) return { exists: false, url, platform: R2_PROBE_PLATFORM };
+    if (!r.ok)             return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `r2 ${r.status}` };
+    return {
+      exists: true,
+      url,
+      platform: R2_PROBE_PLATFORM,
+      lastModified: r.headers.get('last-modified') || null,
+      contentLength: r.headers.get('content-length') || null,
+    };
+  } catch (e) {
+    return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `r2 ${e && e.message ? e.message : 'fetch'}` };
+  }
 }
 
-export async function buildCommunityMatrix(env, { perPage = 100, pages = 2 } = {}) {
+export async function buildR2Presence(env, extensionNames, version = DEFAULT_VERSION) {
+  const out = {};
+  const BATCH = 32;
+  for (let i = 0; i < extensionNames.length; i += BATCH) {
+    const slice = extensionNames.slice(i, i + BATCH);
+    const results = await Promise.all(slice.map(async (ext) => [ext, await _probeR2(ext, version)]));
+    for (const [ext, r] of results) out[ext] = r;
+  }
+  return {
+    fetchedAt: new Date().toISOString(),
+    version,
+    extensionsProbed: extensionNames.length,
+    platform: R2_PROBE_PLATFORM,
+    presence: out,
+    _disclaimer: DISCLAIMER,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Core catalog — extensions Haybarn ships on the `/core/` R2 channel. Same
+// shape as the community matrix so the website can render both with one
+// table, but the data source is different:
+//   - Catalog list is the static CORE_EXTENSIONS table in repos.js (mirrors
+//     haybarn_extensions.cmake; rarely changes).
+//   - R2 probe hits the `/core/` channel instead of `/community/`.
+//   - npm/PyPI naming is identical to community (`@haybarn/ext-<name>-h1-5-2`,
+//     `haybarn-ext-<name>-h1-5-2`) — those packages don't exist yet today,
+//     but the deterministic URLs are still useful as "where it'll land."
+// ---------------------------------------------------------------------------
+
+async function _probeR2Core(extension, version = DEFAULT_VERSION) {
+  const url = r2CoreBinaryUrl(extension, R2_PROBE_PLATFORM, version);
+  try {
+    const r = await fetch(url, { method: 'HEAD' });
+    if (r.status === 404) return { exists: false, url, platform: R2_PROBE_PLATFORM };
+    if (!r.ok)             return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `r2 ${r.status}` };
+    return {
+      exists: true,
+      url,
+      platform: R2_PROBE_PLATFORM,
+      lastModified: r.headers.get('last-modified') || null,
+      contentLength: r.headers.get('content-length') || null,
+    };
+  } catch (e) {
+    return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `r2 ${e && e.message ? e.message : 'fetch'}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Upstream DuckDB CDN presence — does the same extension exist on upstream's
+// distribution for the same DuckDB version? Side-by-side with our R2 probe,
+// this lets the status page distinguish "Haybarn-specific failure" from
+// "upstream-wide unavailability for v1.5.2". HEAD against one platform
+// (linux_amd64), same logic as the R2 probe.
+// ---------------------------------------------------------------------------
+
+async function _probeUpstreamUrl(url) {
+  try {
+    const r = await fetch(url, { method: 'HEAD' });
+    if (r.status === 404) return { exists: false, url, platform: R2_PROBE_PLATFORM };
+    if (!r.ok)             return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `upstream ${r.status}` };
+    return {
+      exists: true,
+      url,
+      platform: R2_PROBE_PLATFORM,
+      lastModified: r.headers.get('last-modified') || null,
+      contentLength: r.headers.get('content-length') || null,
+    };
+  } catch (e) {
+    return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `upstream ${e && e.message ? e.message : 'fetch'}` };
+  }
+}
+
+async function _probeUpstreamCommunity(extension, version) {
+  return _probeUpstreamUrl(upstreamCommunityBinaryUrl(extension, R2_PROBE_PLATFORM, version));
+}
+async function _probeUpstreamCore(extension, version) {
+  return _probeUpstreamUrl(upstreamCoreBinaryUrl(extension, R2_PROBE_PLATFORM, version));
+}
+
+export async function buildUpstreamPresence(env, extensionNames, channel, version = DEFAULT_VERSION) {
+  const probe = channel === 'core' ? _probeUpstreamCore : _probeUpstreamCommunity;
+  const out = {};
+  const BATCH = 32;
+  for (let i = 0; i < extensionNames.length; i += BATCH) {
+    const slice = extensionNames.slice(i, i + BATCH);
+    const results = await Promise.all(slice.map(async (ext) => [ext, await probe(ext, version)]));
+    for (const [ext, r] of results) out[ext] = r;
+  }
+  return {
+    fetchedAt: new Date().toISOString(),
+    channel,
+    version,
+    extensionsProbed: extensionNames.length,
+    platform: R2_PROBE_PLATFORM,
+    presence: out,
+    _disclaimer: DISCLAIMER,
+  };
+}
+
+export async function buildCoreCatalog(env, version = DEFAULT_VERSION) {
+  const BATCH = 32;
+  const out = [];
+  for (let i = 0; i < CORE_EXTENSIONS.length; i += BATCH) {
+    const slice = CORE_EXTENSIONS.slice(i, i + BATCH);
+    const batch = await Promise.all(slice.map(async (ext) => {
+      const [r2, npm, pypi] = await Promise.all([
+        _probeR2Core(ext.name, version),
+        _probeNpm(npmName(ext.name, version)),
+        _probePypi(pypiName(ext.name, version)),
+      ]);
+      return {
+        name: ext.name,
+        layer: ext.layer,
+        version: null,    // core extensions don't carry a description.yml version today
+        commitSha: null,
+        description: null,
+        repo: null,
+        run: null,        // no per-extension CI run for core; engine carries it
+        registries: { npm, pypi },
+        r2,
+      };
+    }));
+    out.push(...batch);
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    fetchedAt: new Date().toISOString(),
+    version,
+    extensions: out,
+    catalogSize: CORE_EXTENSIONS.length,
+    platform: R2_PROBE_PLATFORM,
+    _disclaimer: DISCLAIMER,
+  };
+}
+
+// Every recent per-extension build.yml run on the community repo, straight
+// from the DO (webhook feed). Path-filtered server-side via runsForWorkflow,
+// so there's no 100-run runsForBranch ceiling — individual build.yml
+// dispatches alone now cover the full ~244-extension catalog. The DO holds the
+// full history; 300 gives comfortable headroom over the catalog size.
+async function listRecentCommunityRuns(env) {
+  return env.FEED.runsForWorkflow(
+    `${ORG}/${COMMUNITY_REPO.repo}`, COMMUNITY_REPO.branch, COMMUNITY_REPO.workflowFile, 300,
+  );
+}
+
+export async function buildCommunityMatrix(env) {
+  // Canonical catalog enumeration — every extensions/<name>/ subdir in the
+  // haybarn-community-extensions repo, with parsed description.yml metadata
+  // (version, repo.github, repo.ref). The CI-run sources below fill in the
+  // build-state side; extensions without a recent run still appear with
+  // `run: null` so the page can show "not yet built".
+  let catalog = [];
+  try {
+    catalog = await enumerateCatalog(env);
+  } catch (e) {
+    console.log('enumerateCatalog failed:', e?.message || e);
+  }
+
   // Prefer build_all source when it has substantive data: that single
   // workflow run captures every extension built across the catalog.
   let buildAllMatrix = null;
@@ -398,7 +497,7 @@ export async function buildCommunityMatrix(env, { perPage = 100, pages = 2 } = {
     console.log('buildMatrixFromBuildAll fallback:', e?.message || e);
   }
 
-  // Also scan recent build.yml runs (paginated) so we catch all the
+  // Also scan recent build.yml runs (from the feed) so we catch all the
   // per-extension dispatches that happened outside any build_all run.
   // The two sources are MERGED: build_all matrix entries take
   // precedence (they carry the full per-platform job grid), but
@@ -406,7 +505,7 @@ export async function buildCommunityMatrix(env, { perPage = 100, pages = 2 } = {
   // or that were dispatched independently afterwards.
   let runs = [];
   try {
-    runs = await listRecentCommunityRuns(env, { pages, perPage });
+    runs = await listRecentCommunityRuns(env);
   } catch (e) {
     if (!buildAllMatrix) {
       return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], error: String(e.message || e), _disclaimer: DISCLAIMER };
@@ -421,44 +520,41 @@ export async function buildCommunityMatrix(env, { perPage = 100, pages = 2 } = {
     return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], _disclaimer: DISCLAIMER };
   }
 
-  // Pass 1: try display_title (free, no API call). Mark which runs still
-  // need commit-based attribution.
+  // Attribute each build.yml run to an extension via display_title (e.g.
+  // "🐤 <extname>"). Commit-based fallback isn't possible from webhook data
+  // (no commits API), so runs without an identifiable title are skipped —
+  // build_all already covers the full catalog, so this only drops the odd
+  // bulk/refactor run we couldn't have attributed reliably anyway.
   const runExt = new Map();          // runId → extension name
-  const needCommit = new Map();      // sha → list of runs needing fallback
   for (const r of runs) {
     const fromTitle = extensionFromDisplayTitle(r.display_title || r.name);
-    if (fromTitle) {
-      runExt.set(r.id, fromTitle);
-    } else if (r.head_sha) {
-      if (!needCommit.has(r.head_sha)) needCommit.set(r.head_sha, []);
-      needCommit.get(r.head_sha).push(r);
-    }
+    if (fromTitle) runExt.set(r.id, fromTitle);
   }
 
-  // Pass 2: for runs without a display_title-derived name, look up the
-  // commit (deduped by sha). Multi-descriptor commits stay unattributed.
-  await Promise.all([...needCommit.keys()].map(async (sha) => {
-    const ext = await commitSingleExtension(env, sha);
-    if (ext) {
-      for (const r of needCommit.get(sha)) runExt.set(r.id, ext);
-    }
-  }));
-
   // Group runs by attributable extension, keeping the highest run_number.
+  // Track in-flight runs we COULDN'T attribute (e.g. a bulk build.yml dispatch
+  // started without an `extension_name` input, so the run-name is the generic
+  // workflow name rather than "🐤 <ext>"). We can't map these to a row, but we
+  // surface the count so the activity is at least visible.
   const byExt = new Map();
   let skippedBulk = 0;
+  let unattributedInflight = 0;
   for (const r of runs) {
     const ext = runExt.get(r.id);
-    if (!ext) { skippedBulk++; continue; }
+    if (!ext) {
+      skippedBulk++;
+      if (r.status === 'queued' || r.status === 'in_progress') unattributedInflight++;
+      continue;
+    }
     const existing = byExt.get(ext);
     if (!existing || existing.run_number < r.run_number) byExt.set(ext, r);
   }
 
-  // Fetch jobs for each kept run (parallel, max 1 page → first 100 jobs).
+  // Fetch jobs for each kept run from the feed (parallel).
   const extensions = await Promise.all([...byExt.entries()].map(async ([name, run]) => {
     let jobs = [];
     try {
-      const all = await fetchRunJobs(env, ORG, COMMUNITY_REPO.repo, run.id, 1, run.conclusion);
+      const all = await env.FEED.jobsForRun(run.id);
       jobs = all.filter(j => /\(/.test(j.name)).map(summarizeJob);
     } catch (_) { /* leave jobs empty */ }
     return { name, run: summarizeRun(run, null), jobs };
@@ -474,14 +570,61 @@ export async function buildCommunityMatrix(env, { perPage = 100, pages = 2 } = {
     }
   }
 
-  extensions.sort((a, b) => a.name.localeCompare(b.name));
+  // Left-join the CI-run-derived extensions onto the catalog enumeration so
+  // every extension on disk appears, even if it has never been built. The
+  // catalog is authoritative for the row list and for metadata (version,
+  // commitSha, repo); the run-data side fills in build state.
+  let merged;
+  if (catalog.length > 0) {
+    const runByName = new Map(extensions.map(e => [e.name, e]));
+    merged = catalog.map(c => {
+      const r = runByName.get(c.name);
+      return {
+        name: c.name,
+        version: c.version,
+        commitSha: c.commitSha,
+        description: c.description,
+        license: c.license,
+        language: c.language,
+        repo: c.repo,
+        run: r?.run ?? null,
+        jobs: r?.jobs ?? null,
+      };
+    });
+    // Surface anything CI saw but the catalog didn't (shouldn't happen, but
+    // safer than silently dropping rows).
+    const inCatalog = new Set(catalog.map(c => c.name));
+    for (const r of extensions) {
+      if (!inCatalog.has(r.name)) {
+        merged.push({
+          name: r.name,
+          version: null, commitSha: null, description: null,
+          license: null, language: null, repo: null,
+          run: r.run, jobs: r.jobs,
+        });
+      }
+    }
+  } else {
+    // Fallback: catalog enumeration failed — keep the legacy CI-only list
+    // shape so the page still has something to render.
+    merged = extensions.map(r => ({
+      name: r.name,
+      version: null, commitSha: null, description: null,
+      license: null, language: null, repo: null,
+      run: r.run, jobs: r.jobs,
+    }));
+  }
+
+  merged.sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     fetchedAt: new Date().toISOString(),
     scannedRuns: runs.length,
     scannedBuildAllExtensions: buildAllMatrix ? buildAllMatrix.extensions.length : 0,
     skippedBulkRuns: skippedBulk,
-    extensions,
+    unattributedInflight,
+    catalogSize: catalog.length,
+    extensions: merged,
     _disclaimer: DISCLAIMER,
   };
 }
