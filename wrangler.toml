@@ -11,6 +11,15 @@ account_id = "bb68a133a66d26a310231495b13479a1"
 binding = "STATUS_KV"
 id = "85108e76b21b44ba9c69da7f26a4dc56"
 
+# Service binding to the webhook collector (haybarn-github-actions). Its
+# StatusFeed entrypoint serves live GitHub Actions state reduced from org
+# webhook events, so this worker reads CI status from here instead of polling
+# the GitHub Actions API. Same Cloudflare account; no token crosses the network.
+[[services]]
+binding = "FEED"
+service = "haybarn-github-actions"
+entrypoint = "StatusFeed"
+
 # Custom domain. Cloudflare auto-creates the proxied DNS record in the
 # query.farm zone on deploy and provisions the TLS cert.
 [[routes]]

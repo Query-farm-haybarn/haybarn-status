@@ -5,6 +5,7 @@ export const TAG_FIRED_REPOS = [
   { repo: 'haybarn-python',  label: 'Python'  },
   { repo: 'haybarn-jdbc',    label: 'JDBC'    },
   { repo: 'haybarn-node-neo', label: 'Node'   },
+  { repo: 'haybarn-wasm',    label: 'Wasm'    },
 ];
 
 export const FORK_EXT_REPOS = [
@@ -32,25 +33,122 @@ export const DISCLAIMER = 'DuckDB is a trademark of the DuckDB Foundation.';
 // Stay in lockstep with:
 //   - haybarn-extension-ci-tools/scripts/publish/pypi_build_wheel.py
 //   - haybarn-extension-ci-tools/scripts/publish/npm_build_meta.py
-export const HAYBARN_VERSION = '1.5.2';
-const HAYBARN_VERSION_SUFFIX = 'h' + HAYBARN_VERSION.replace(/\./g, '-');
+// The status server supports multiple Haybarn (DuckDB) versions at once. The
+// version is derived per-page from the rc tag being viewed (e.g.
+// `haybarn-v1.5.3-rc1` → `1.5.3`); the version-dependent builders below all
+// take a `version` argument. DEFAULT_VERSION is only the fallback for contexts
+// with no tag in hand.
+export const DEFAULT_VERSION = '1.5.2';
 
-export function pypiName(extension) {
-  return `haybarn-ext-${extension}-${HAYBARN_VERSION_SUFFIX}`;
+// Back-compat alias; prefer passing an explicit version.
+export const HAYBARN_VERSION = DEFAULT_VERSION;
+
+// Extract the X.Y.Z version embedded in a `haybarn-v<X.Y.Z>[-rcN]` tag.
+// Returns null when the tag doesn't carry a parseable version.
+export function parseVersionFromTag(tag) {
+  const m = String(tag || '').match(/^haybarn-v(\d+\.\d+\.\d+)/);
+  return m ? m[1] : null;
 }
-export function npmName(extension) {
-  return `@haybarn/ext-${extension}-${HAYBARN_VERSION_SUFFIX}`;
+
+function versionSuffix(version) {
+  return 'h' + String(version).replace(/\./g, '-');
+}
+
+export function pypiName(extension, version = DEFAULT_VERSION) {
+  return `haybarn-ext-${extension}-${versionSuffix(version)}`;
+}
+export function npmName(extension, version = DEFAULT_VERSION) {
+  return `@haybarn/ext-${extension}-${versionSuffix(version)}`;
 }
 
 // R2 binary path (where the engine actually fetches the .duckdb_extension
 // at INSTALL time). Used by the worker to confirm a binary is reachable
 // per platform. Wasm binaries use the `.wasm` suffix; everything else is
 // `.duckdb_extension.gz`. Keep in lockstep with the engine's URL builder.
-export const R2_BASE = 'https://haybarn-extensions.query.farm/community/v' + HAYBARN_VERSION;
-export function r2BinaryUrl(extension, platform) {
+export const R2_HOST = 'https://haybarn-extensions.query.farm';
+export function communityR2Base(version = DEFAULT_VERSION) {
+  return `${R2_HOST}/community/v${version}`;
+}
+export function r2BinaryUrl(extension, platform, version = DEFAULT_VERSION) {
   const ext = platform.startsWith('wasm_') ? '.duckdb_extension.wasm'
                                            : '.duckdb_extension.gz';
-  return `${R2_BASE}/${platform}/${extension}${ext}`;
+  return `${communityR2Base(version)}/${platform}/${extension}${ext}`;
+}
+
+// Core channel — extensions that ship as part of the Haybarn release proper,
+// served from `/core/v<haybarn>/` instead of `/community/v<haybarn>/`. The
+// canonical list lives in haybarn/.github/config/haybarn_extensions.cmake;
+// we mirror it here as a tiny static table so the status worker doesn't have
+// to parse cmake at fetch time. Keep this in sync when the catalog changes.
+//
+// Layer:
+//   'in_tree'   — bundled in the engine binary; their availability mirrors
+//                 the engine row, and Haybarn isn't publishing them as
+//                 separate npm/PyPI packages.
+//   'fork'      — extensions built from Query-farm-haybarn/haybarn-<name>
+//                 build-forks (carry Haybarn patches on top of upstream).
+//   'rebuilt'   — extensions rebuilt from upstream sources unchanged.
+export const CORE_EXTENSIONS = [
+  // In-tree (ship with the engine)
+  { name: 'autocomplete',     layer: 'in_tree' },
+  { name: 'core_functions',   layer: 'in_tree' },
+  { name: 'icu',              layer: 'in_tree' },
+  { name: 'json',             layer: 'in_tree' },
+  { name: 'parquet',          layer: 'in_tree' },
+  { name: 'tpcds',            layer: 'in_tree' },
+  { name: 'tpch',             layer: 'in_tree' },
+  // Build-forks (Query-farm-haybarn/haybarn-<name>)
+  { name: 'httpfs',           layer: 'fork' },
+  { name: 'iceberg',          layer: 'fork' },
+  { name: 'ducklake',         layer: 'fork' },
+  { name: 'delta',            layer: 'fork' },
+  // Rebuilt from upstream, unchanged
+  { name: 'avro',             layer: 'rebuilt' },
+  { name: 'aws',              layer: 'rebuilt' },
+  { name: 'azure',            layer: 'rebuilt' },
+  { name: 'encodings',        layer: 'rebuilt' },
+  { name: 'excel',            layer: 'rebuilt' },
+  { name: 'fts',              layer: 'rebuilt' },
+  { name: 'inet',             layer: 'rebuilt' },
+  { name: 'mysql_scanner',    layer: 'rebuilt' },
+  { name: 'odbc_scanner',     layer: 'rebuilt' },
+  { name: 'postgres_scanner', layer: 'rebuilt' },
+  { name: 'spatial',          layer: 'rebuilt' },
+  { name: 'sqlite_scanner',   layer: 'rebuilt' },
+  { name: 'sqlsmith',         layer: 'rebuilt' },
+  { name: 'unity_catalog',    layer: 'rebuilt' },
+  { name: 'vss',              layer: 'rebuilt' },
+];
+
+// R2 path for core artifacts. Engine fetches from here when an `INSTALL` hits
+// one of the catalog names above.
+export function coreR2Base(version = DEFAULT_VERSION) {
+  return `${R2_HOST}/core/v${version}`;
+}
+export function r2CoreBinaryUrl(extension, platform, version = DEFAULT_VERSION) {
+  const ext = platform.startsWith('wasm_') ? '.duckdb_extension.wasm'
+                                           : '.duckdb_extension.gz';
+  return `${coreR2Base(version)}/${platform}/${extension}${ext}`;
+}
+
+// Upstream DuckDB extension CDN URLs. We probe these alongside the Haybarn R2
+// paths so the status page can show parity per-extension: if upstream is also
+// failing to ship a binary for v1.5.2, that's not a Haybarn-specific problem.
+export function upstreamCommunityBase(version = DEFAULT_VERSION) {
+  return `https://community-extensions.duckdb.org/v${version}`;
+}
+export function upstreamCoreBase(version = DEFAULT_VERSION) {
+  return `https://extensions.duckdb.org/v${version}`;
+}
+export function upstreamCommunityBinaryUrl(extension, platform, version = DEFAULT_VERSION) {
+  const ext = platform.startsWith('wasm_') ? '.duckdb_extension.wasm'
+                                           : '.duckdb_extension.gz';
+  return `${upstreamCommunityBase(version)}/${platform}/${extension}${ext}`;
+}
+export function upstreamCoreBinaryUrl(extension, platform, version = DEFAULT_VERSION) {
+  const ext = platform.startsWith('wasm_') ? '.duckdb_extension.wasm'
+                                           : '.duckdb_extension.gz';
+  return `${upstreamCoreBase(version)}/${platform}/${extension}${ext}`;
 }
 
 // Filed-upstream-issue tracker. Curated map keyed by extension name.

@@ -1,9 +1,10 @@
 import {
   buildRcView, buildForks, buildCommunityMatrix, listEngineTags,
-  buildRegistryPresence,
+  buildRegistryPresence, buildR2Presence, buildCoreCatalog,
+  buildUpstreamPresence,
 } from './collect.js';
 import { renderIndex, renderRcPage, renderError } from './render.js';
-import { DISCLAIMER, TAG_PREFIX } from './repos.js';
+import { DISCLAIMER, TAG_PREFIX, DEFAULT_VERSION, parseVersionFromTag } from './repos.js';
 
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#161b22"/><text x="16" y="22" font-family="ui-monospace,Menlo,monospace" font-size="18" font-weight="700" fill="#58a6ff" text-anchor="middle">h</text></svg>`;
 
@@ -60,34 +61,149 @@ async function handleRcPage(env, ctx, tag, asJson) {
       ? json({ error: 'invalid tag', _disclaimer: DISCLAIMER }, { status: 400 })
       : html(renderError(`invalid tag: ${tag}`, 400).body, { status: 400 });
   }
-  const [view, forks, community] = await Promise.all([
-    getCached(env, ctx, `rc:${tag}`, 30, 300, () => buildRcView(env, tag)),
-    getCached(env, ctx, 'forks', 60, 300, () => buildForks(env)),
-    // Community matrix is the expensive one (paginated build_all job
-    // list, 20+ GH API calls per cold fetch). Aggressive stale window
-    // keeps users on cache forever after first load — background
-    // refreshes via ctx.waitUntil populate the new data invisibly.
-    // A scheduled() handler below also pre-warms on a cron.
-    getCached(env, ctx, 'community', 60, 86400, () => buildCommunityMatrix(env)),
+  // The Haybarn (DuckDB) version is encoded in the tag (haybarn-v1.5.3-rc1 →
+  // 1.5.3). All version-dependent probes (R2 / npm / PyPI / upstream) and their
+  // cache keys are scoped to this version, so 1.5.2 and 1.5.3 rc pages each
+  // probe their own artifact paths.
+  const version = parseVersionFromTag(tag) || DEFAULT_VERSION;
+  const [view, forks, community, core] = await Promise.all([
+    // rc/forks/community now read live CI state from the webhook collector
+    // (StatusFeed) — cheap DO-RPC reads, no GitHub Actions API. Short fresh
+    // windows keep the page within seconds of the webhook stream; the
+    // stale-while-revalidate window still shields against a transient feed blip.
+    getCached(env, ctx, `rc:${tag}`, 10, 300, () => buildRcView(env, tag)),
+    getCached(env, ctx, 'forks', 15, 300, () => buildForks(env)),
+    // Community matrix (catalog list + CI runs) is version-independent.
+    getCached(env, ctx, 'community', 30, 86400, () => buildCommunityMatrix(env)),
+    // Core catalog — small, fast (~26 R2 HEADs + ~52 registry probes). Version-scoped.
+    getCached(env, ctx, `core:${version}`, 60, 3600, () => buildCoreCatalog(env, version)),
   ]);
 
-  // Registry-presence is the second-most-expensive (240+ HTTPS GETs to
-  // npm + PyPI). Cache aggressively + only refresh on the cron, never
-  // synchronously on a page load. If the cache is empty, we just don't
-  // show registry pills until the first cron tick. Page renders fine
-  // without them.
+  // Registry + R2 presence — the authoritative "is this extension actually
+  // installable today" signal, independent of recent CI activity. We probe
+  // npm/PyPI/R2 directly. On cache miss, compute synchronously so the first
+  // visit after deploy isn't blocked on a 15-min cron tick.
+  const extensionNames = Array.isArray(community.extensions)
+    ? community.extensions.map(e => e.name).filter(Boolean)
+    : [];
+
   let registryPresence = null;
   try {
-    const cached = await env.STATUS_KV.get('registry-presence', { type: 'json' });
+    const cached = await env.STATUS_KV.get(`registry-presence:${version}`, { type: 'json' });
     if (cached && cached.data) registryPresence = cached.data;
   } catch (_) {}
-  if (registryPresence) {
-    // Fold into the community matrix so the renderer can decorate rows.
-    community.registries = registryPresence;
+  if (!registryPresence && extensionNames.length) {
+    try {
+      registryPresence = await buildRegistryPresence(env, extensionNames, version);
+      ctx.waitUntil(env.STATUS_KV.put(`registry-presence:${version}`, JSON.stringify({
+        fetchedAtMs: Date.now(), data: registryPresence,
+      }), { expirationTtl: 86400 }));
+    } catch (e) { console.log('registry-presence sync compute failed:', e?.message || e); }
   }
 
-  const merged = { ...view, sidePanel: { forks: forks.forks, community } };
+  let r2Presence = null;
+  try {
+    const cached = await env.STATUS_KV.get(`r2-presence:${version}`, { type: 'json' });
+    if (cached && cached.data) r2Presence = cached.data;
+  } catch (_) {}
+  if (!r2Presence && extensionNames.length) {
+    try {
+      r2Presence = await buildR2Presence(env, extensionNames, version);
+      ctx.waitUntil(env.STATUS_KV.put(`r2-presence:${version}`, JSON.stringify({
+        fetchedAtMs: Date.now(), data: r2Presence,
+      }), { expirationTtl: 86400 }));
+    } catch (e) { console.log('r2-presence sync compute failed:', e?.message || e); }
+  }
+
+  // Upstream community-extensions presence — for side-by-side comparison.
+  let upstreamCommunityPresence = null;
+  try {
+    const cached = await env.STATUS_KV.get(`upstream-community-presence:${version}`, { type: 'json' });
+    if (cached && cached.data) upstreamCommunityPresence = cached.data;
+  } catch (_) {}
+  if (!upstreamCommunityPresence && extensionNames.length) {
+    try {
+      upstreamCommunityPresence = await buildUpstreamPresence(env, extensionNames, 'community', version);
+      ctx.waitUntil(env.STATUS_KV.put(`upstream-community-presence:${version}`, JSON.stringify({
+        fetchedAtMs: Date.now(), data: upstreamCommunityPresence,
+      }), { expirationTtl: 86400 }));
+    } catch (e) { console.log('upstream-community sync compute failed:', e?.message || e); }
+  }
+
+  // Upstream core-extensions presence — only meaningful for the core list.
+  let upstreamCorePresence = null;
+  const coreNames = (core && Array.isArray(core.extensions))
+    ? core.extensions.map(e => e.name).filter(Boolean) : [];
+  try {
+    const cached = await env.STATUS_KV.get(`upstream-core-presence:${version}`, { type: 'json' });
+    if (cached && cached.data) upstreamCorePresence = cached.data;
+  } catch (_) {}
+  if (!upstreamCorePresence && coreNames.length) {
+    try {
+      upstreamCorePresence = await buildUpstreamPresence(env, coreNames, 'core', version);
+      ctx.waitUntil(env.STATUS_KV.put(`upstream-core-presence:${version}`, JSON.stringify({
+        fetchedAtMs: Date.now(), data: upstreamCorePresence,
+      }), { expirationTtl: 86400 }));
+    } catch (e) { console.log('upstream-core sync compute failed:', e?.message || e); }
+  }
+
+  if (registryPresence) community.registries = registryPresence;
+
+  if (Array.isArray(community.extensions)) {
+    const regMap = (registryPresence && registryPresence.presence) || {};
+    const r2Map  = (r2Presence       && r2Presence.presence)       || {};
+    const upMap  = (upstreamCommunityPresence && upstreamCommunityPresence.presence) || {};
+    community.extensions = community.extensions.map(ext => ({
+      ...ext,
+      registries: regMap[ext.name] || null,
+      r2:         r2Map[ext.name]  || null,
+      upstream:   upMap[ext.name]  || null,
+    }));
+  }
+
+  // Fold upstream-core presence into each core extension.
+  if (core && Array.isArray(core.extensions) && upstreamCorePresence) {
+    const upMap = upstreamCorePresence.presence || {};
+    core.extensions = core.extensions.map(ext => ({
+      ...ext,
+      upstream: upMap[ext.name] || null,
+    }));
+  }
+
+  // Stamp core extensions with the commit sha that produced what's on R2.
+  // - `fork`-layer extensions are rebuilt independently from their build-fork
+  //   repos (haybarn-httpfs, haybarn-iceberg, …); their version is the
+  //   fork's latest run head_sha.
+  // - `in_tree` and `rebuilt`-layer extensions are built by the engine
+  //   release pipeline and share the engine repo's head_sha.
+  if (core && Array.isArray(core.extensions)) {
+    const engineRepo = view?.repos?.find(r => r.label === 'Engine');
+    const engineSha  = engineRepo?.runs?.[0]?.headSha || null;
+    const forkShaByExt = {};
+    for (const f of (forks.forks || [])) {
+      const extName = String(f.repo || '').replace(/^haybarn-/, '').toLowerCase();
+      if (extName) forkShaByExt[extName] = f.run?.headSha || null;
+    }
+    core.extensions = core.extensions.map(ext => {
+      let commitSha = ext.commitSha || null;
+      if (ext.layer === 'fork') {
+        commitSha = forkShaByExt[ext.name] || commitSha;
+      } else if (ext.layer === 'in_tree' || ext.layer === 'rebuilt') {
+        commitSha = engineSha || commitSha;
+      }
+      return { ...ext, commitSha };
+    });
+  }
+
+  const merged = { ...view, version, sidePanel: { forks: forks.forks, community, core } };
   return asJson ? json(merged) : html(renderRcPage(merged));
+}
+
+// Newest X.Y.Z among the discovered haybarn-v* tags (numeric compare).
+function latestVersionFromTags(tags) {
+  const versions = [...new Set((tags || []).map(parseVersionFromTag).filter(Boolean))];
+  versions.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  return versions[0] || null;
 }
 
 async function handleIndex(env, ctx) {
@@ -112,30 +228,54 @@ async function refreshCacheKey(env, ctx, key, staleSec, fetcher) {
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(Promise.all([
-      refreshCacheKey(env, ctx, 'community', 86400, () => buildCommunityMatrix(env)),
-      refreshCacheKey(env, ctx, 'forks',     300,   () => buildForks(env)),
-      refreshCacheKey(env, ctx, 'tags',      1800,  () => listEngineTags(env)),
-      // Registry presence is bigger than the others (~480 outbound
-      // GETs against npm + PyPI) so we run it after the community
-      // matrix is hot — it reads back the extension list from the
-      // matrix it just refreshed, avoiding a duplicate GH fetch.
-      (async () => {
-        try {
-          const cm = await env.STATUS_KV.get('community', { type: 'json' });
-          const exts = (cm && cm.data && cm.data.extensions) || [];
-          const names = exts.map(e => e.name).filter(Boolean);
-          if (names.length) {
-            await refreshCacheKey(env, ctx, 'registry-presence', 86400,
-              () => buildRegistryPresence(env, names));
-          } else {
-            console.log('prewarm registry-presence: no extensions in matrix');
-          }
-        } catch (e) {
-          console.log('prewarm registry-presence:', e?.message || e);
+    ctx.waitUntil((async () => {
+      // Version-independent caches first.
+      await Promise.all([
+        refreshCacheKey(env, ctx, 'community', 86400, () => buildCommunityMatrix(env)),
+        refreshCacheKey(env, ctx, 'forks',     300,   () => buildForks(env)),
+        refreshCacheKey(env, ctx, 'tags',      1800,  () => listEngineTags(env)),
+      ]);
+
+      // Presence probes are version-scoped and heavy (~980 outbound HEAD/GETs
+      // per version). To stay under the per-invocation subrequest limit we
+      // prewarm only the LATEST version each tick; older versions' presence is
+      // computed lazily on first visit and then cached.
+      let version = DEFAULT_VERSION;
+      try {
+        const t = await env.STATUS_KV.get('tags', { type: 'json' });
+        version = latestVersionFromTags(t && t.data && t.data.tags) || DEFAULT_VERSION;
+      } catch (_) {}
+
+      await refreshCacheKey(env, ctx, `core:${version}`, 3600,
+        () => buildCoreCatalog(env, version));
+
+      try {
+        const cm = await env.STATUS_KV.get('community', { type: 'json' });
+        const exts = (cm && cm.data && cm.data.extensions) || [];
+        const names = exts.map(e => e.name).filter(Boolean);
+        if (names.length) {
+          await Promise.all([
+            refreshCacheKey(env, ctx, `registry-presence:${version}`, 86400,
+              () => buildRegistryPresence(env, names, version)),
+            refreshCacheKey(env, ctx, `r2-presence:${version}`, 86400,
+              () => buildR2Presence(env, names, version)),
+            refreshCacheKey(env, ctx, `upstream-community-presence:${version}`, 86400,
+              () => buildUpstreamPresence(env, names, 'community', version)),
+          ]);
+        } else {
+          console.log('prewarm presence: no extensions in matrix');
         }
-      })(),
-    ]));
+        const coreCache = await env.STATUS_KV.get(`core:${version}`, { type: 'json' });
+        const coreExts = (coreCache && coreCache.data && coreCache.data.extensions) || [];
+        const coreNames = coreExts.map(e => e.name).filter(Boolean);
+        if (coreNames.length) {
+          await refreshCacheKey(env, ctx, `upstream-core-presence:${version}`, 86400,
+            () => buildUpstreamPresence(env, coreNames, 'core', version));
+        }
+      } catch (e) {
+        console.log('prewarm presence:', e?.message || e);
+      }
+    })());
   },
 
   async fetch(request, env, ctx) {
