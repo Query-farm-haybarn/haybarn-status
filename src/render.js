@@ -57,6 +57,13 @@ table { width: 100%; border-collapse: collapse; }
 th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
 tr:last-child td { border-bottom: none; }
+/* Per-repo run tables are separate <table>s; fixed column widths keep Status /
+   Updated / Duration aligned across every section so they scan as columns. */
+.runs-table { table-layout: fixed; }
+.runs-table th, .runs-table td { overflow: hidden; text-overflow: ellipsis; }
+.runs-table th.c-status, .runs-table td.c-status { width: 124px; }
+.runs-table th.c-when, .runs-table td.c-when { width: 96px; }
+.runs-table th.c-dur, .runs-table td.c-dur { width: 96px; }
 .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; background: var(--grey); color: var(--fg); }
 .pill.success    { background: var(--ok);   color: var(--ok-fg); }
 .pill.failure,
@@ -531,15 +538,15 @@ function renderRepoSection({ repo, label, runs, error }) {
   } else {
     const rows = runs.map(r => `
       <tr>
-        <td>${pillFor(r)}</td>
+        <td class="c-status">${pillFor(r)}</td>
         <td><a href="${escapeHtml(r.htmlUrl)}">${escapeHtml(r.workflowName)}</a> <small style="color:var(--muted)">#${r.runNumber}</small></td>
-        <td class="mono">${fmtRelative(r.updatedAt || r.createdAt)}</td>
-        <td class="mono">${fmtDuration(r.createdAt, r.status === 'completed' ? r.updatedAt : null)}</td>
+        <td class="c-when mono">${fmtRelative(r.updatedAt || r.createdAt)}</td>
+        <td class="c-dur mono">${fmtDuration(r.createdAt, r.status === 'completed' ? r.updatedAt : null)}</td>
       </tr>
       ${r.jobs ? `<tr><td colspan="4">${renderRunJobs(r.jobs)}</td></tr>` : ''}
     `).join('');
-    body = `<table>
-      <thead><tr><th>Status</th><th>Workflow</th><th>Updated</th><th>Duration</th></tr></thead>
+    body = `<table class="runs-table">
+      <thead><tr><th class="c-status">Status</th><th>Workflow</th><th class="c-when">Updated</th><th class="c-dur">Duration</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   }
@@ -1148,6 +1155,7 @@ function insightsScript(dataJson) {
   function go(id, spec){ var el=document.getElementById(id); if(!el) return; spec.width='container'; spec.background='transparent'; spec.config=CFG; spec['$schema']='https://vega.github.io/schema/vega-lite/v5.json'; vegaEmbed('#'+id, spec, {actions:false, renderer:'svg'}).catch(function(e){ el.innerHTML='<span class="err">chart failed to render</span>'; }); }
   go('c_repo', { data:{values:D.byRepo}, mark:{type:'bar', color:'#725843', cornerRadiusEnd:3}, height:{step:24}, encoding:{ y:{field:'repo',type:'nominal',sort:'-x',axis:{title:null}}, x:{field:'run_min',type:'quantitative',axis:{title:'minutes'}}, tooltip:[{field:'repo'},{field:'run_min',title:'minutes'},{field:'jobs'},{field:'avg_min',title:'avg min/job'}] }});
   go('c_outcome', { data:{values:D.byConclusion}, mark:{type:'arc', innerRadius:55}, height:230, encoding:{ theta:{field:'run_min',type:'quantitative'}, color:{field:'outcome',type:'nominal',scale:OUTCOME,legend:{title:null}}, tooltip:[{field:'outcome'},{field:'run_min',title:'minutes'},{field:'jobs'}] }});
+  go('c_ext', { data:{values:D.byExtension}, mark:{type:'bar', color:'#15803d', cornerRadiusEnd:3}, height:{step:18}, encoding:{ y:{field:'ext',type:'nominal',sort:'-x',axis:{title:null,labelLimit:220}}, x:{field:'run_min',type:'quantitative',axis:{title:'compute minutes'}}, tooltip:[{field:'ext',title:'extension'},{field:'run_min',title:'minutes'},{field:'jobs'}] }});
   go('c_jobs', { data:{values:D.topJobs}, mark:{type:'bar', color:'#725843', cornerRadiusEnd:3}, height:{step:18}, encoding:{ y:{field:'label',type:'nominal',sort:'-x',axis:{title:null,labelLimit:360}}, x:{field:'run_min',type:'quantitative',axis:{title:'total minutes'}}, tooltip:[{field:'name',title:'job'},{field:'repo'},{field:'run_min',title:'minutes'},{field:'jobs'}] }});
   go('c_day', { data:{values:D.byDay}, mark:{type:'bar', color:'#725843'}, height:230, encoding:{ x:{field:'day',type:'temporal',axis:{title:null,format:'%b %d'}}, y:{field:'run_min',type:'quantitative',axis:{title:'minutes'}}, tooltip:[{field:'day'},{field:'run_min',title:'minutes'},{field:'jobs'}] }});
 <\/script>`;
@@ -1162,7 +1170,8 @@ export function renderInsightsPage(view) {
     label: `${repoShort(r.repo)} · ${String(r.name || '')}`.slice(0, 72),
     name: r.name, repo: repoShort(r.repo), run_min: r.run_min, jobs: r.jobs,
   }));
-  const data = JSON.stringify({ byRepo, byConclusion, byDay, topJobs });
+  const byExtension = (view.byExtension || []).map(r => ({ ext: r.ext, run_min: r.run_min, jobs: r.jobs }));
+  const data = JSON.stringify({ byRepo, byConclusion, byDay, topJobs, byExtension });
 
   const totalMin = byRepo.reduce((s, r) => s + (r.run_min || 0), 0);
   const fmtHrs = m => (m >= 60 ? `${(m / 60).toFixed(1)}h` : `${Math.round(m)}m`);
@@ -1192,6 +1201,7 @@ export function renderInsightsPage(view) {
   <div class="charts">
     <div class="chart-card"><h3>Compute by repo</h3><div class="sub">total job-minutes</div><div class="chart-box" id="c_repo"></div></div>
     <div class="chart-card"><h3>Compute by outcome</h3><div class="sub">minutes per conclusion — cancelled = wasted</div><div class="chart-box" id="c_outcome"></div></div>
+    <div class="chart-card wide"><h3>Community compute by extension</h3><div class="sub">top 40 — minutes attributed per extension (build_all + per-ext dispatches)</div><div class="chart-box" id="c_ext"></div></div>
     <div class="chart-card wide"><h3>Top 25 jobs by total run time</h3><div class="sub">where the minutes concentrate</div><div class="chart-box" id="c_jobs"></div></div>
     <div class="chart-card wide"><h3>Compute per day</h3><div class="sub">job-minutes by day started</div><div class="chart-box" id="c_day"></div></div>
   </div>
