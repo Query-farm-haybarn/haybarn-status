@@ -635,7 +635,14 @@ function renderCommunitySection(c) {
       if (s === 'success') okC++;
       else if (s === 'failure' || s === 'timed_out') failC++;
       else if (s === 'in_progress' || s === 'queued' || s === 'pending' || s === 'waiting') ipC++;
-      if (j.durationSec != null) {
+      // Only count legs that actually executed toward build time. A leg
+      // cancelled while still queued (the common case when a sibling leg
+      // fails and GitHub cancels the rest) never got a runner, so GitHub
+      // leaves its started_at at the queue-entry time — making
+      // completed_at − started_at pure queue wait, not build. Including those
+      // legs inflated the slowest-leg/critical-path number to multiple hours
+      // on failed builds (e.g. elasticsearch's cancelled wasm_eh leg).
+      if (j.durationSec != null && s !== 'cancelled') {
         if (slowestSec == null || j.durationSec > slowestSec) slowestSec = j.durationSec;
         const pt = platTime.get(plat) || { sum: 0, n: 0 };
         pt.sum += j.durationSec; pt.n++;
