@@ -7,6 +7,9 @@ project, served at **<https://haybarn-status.query.farm>**.
 - `/r/<tag>` — per-rc status across engine, drivers, wasm, and the extension catalog
 - `/api/r/<tag>` — same data as JSON, for scripts, AI agents, and the
   `query.farm` Astro site (which snapshots it at build time)
+- `/activity` — live `tail -f`-style feed of the webhook stream (workflow runs,
+  jobs, releases), newest first; polls `/api/activity` every 5s and prepends
+  new rows. `/api/activity?before=<receivedAt>&limit=` pages backwards.
 - `/healthz` — liveness
 
 It is **multi-version**: the Haybarn/DuckDB version is derived from the rc tag
@@ -20,7 +23,11 @@ extension repos (`haybarn-iceberg`, `-ducklake`, `-delta`, `-httpfs`) and the
 tag, so they're shown as "current state" rather than rc-pinned.
 
 UI niceties: per-platform build grids (e.g. the Python wheel matrix), OS brand
-icons, the query.farm light theme, and **opt-in build chimes + auto-refresh**
+icons, a **reliability column** (last-N pass rate per extension, so chronically
+red builds are visible — not just the latest run), **build durations + stuck-leg
+flagging** in cell tooltips, a per-extension **build-time column** (slowest leg,
+build only — queue excluded) plus an aggregate **"build time by platform" bar
+chart**, the query.farm light theme, and **opt-in build chimes + auto-refresh**
 (toggle "🔔 sounds"): the page polls its own JSON every 20s, plays a synth bell
 when a build flips to success/failure, and reloads when the data actually
 changes.
@@ -36,9 +43,12 @@ GitHub Actions API for CI status.
 
 What still hits other sources directly:
 
-- **GitHub App** (`src/gh.js`) — only for the engine tag list (git
-  `matching-refs`) and community-catalog enumeration (Contents API). Not used
-  for Actions/CI state anymore.
+- **GitHub App** (`src/gh.js`) — community-catalog enumeration (Contents API),
+  and a *backstop* for the engine tag list. The tag list is now sourced
+  primarily from the collector's `tags` table (`FEED.listTags`, reduced from
+  `release`/`create` webhooks — which also carry publish times for "published
+  Xh ago"); the `git/matching-refs` API call only fills in tags older than the
+  webhook history. Not used for Actions/CI state.
 - **npm / PyPI / R2 / upstream DuckDB CDN** — probed directly (HEAD/GET) for
   per-extension, version-scoped "is it actually installable" presence.
 

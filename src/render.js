@@ -119,7 +119,42 @@ tr:last-child td { border-bottom: none; }
 .community-table td.cell.in_progress, .community-table td.cell.queued, .community-table td.cell.waiting, .community-table td.cell.pending, .community-table td.cell.requested { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
 .community-table td.cell.cancelled, .community-table td.cell.skipped, .community-table td.cell.neutral { background: var(--grey); }
 .community-table td.cell.empty { background: var(--panel); color: var(--muted); text-align: center; font-size: 10px; line-height: 18px; }
-.community-table tbody tr:hover td.ext, .community-table tbody tr:hover td.row-pill, .community-table tbody tr:hover td.registry { background: var(--panel2); }
+/* A running leg that's blown past the stuck threshold — inset red ring. */
+.community-table td.cell.stuck { box-shadow: inset 0 0 0 2px var(--fail); }
+/* Reliability ratio (last-N pass rate). Colored by health: all-pass green,
+   mixed amber, never-passed red. */
+.community-table td.rel { width: 38px; min-width: 38px; padding: 0 5px; text-align: center; font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+.community-table td.rel.rel-ok { color: var(--ok); }
+.community-table td.rel.rel-warn { color: var(--warn); font-weight: 600; }
+.community-table td.rel.rel-bad { color: var(--fail); font-weight: 700; }
+.community-table td.rel.rel-none { color: var(--muted); }
+.community-table th.rel-head { text-align: center; padding: 6px 4px; font-weight: 500; color: var(--muted); font-size: 11px; }
+/* Per-extension build time (slowest platform leg — build, not queue). Mono
+   numerals; shaded by magnitude so long builds stand out. */
+.community-table td.bt-cell { width: 52px; min-width: 52px; padding: 0 6px; text-align: right; font-family: var(--font-mono); font-size: 11px; white-space: nowrap; color: var(--muted); }
+/* Build-time heat: background intensifies with magnitude so excessive builds
+   stand out at a glance. <10m plain, 10–30m amber wash, ≥30m solid red. */
+.community-table td.bt-cell.bt-lo  { color: var(--fg); }
+.community-table td.bt-cell.bt-mid { color: var(--earth700); background: rgba(217,119,6,0.16); font-weight: 600; }
+.community-table td.bt-cell.bt-hi  { color: #fff; background: var(--fail); font-weight: 700; }
+.community-table th.bt-head { text-align: right; padding: 6px 6px; font-weight: 500; color: var(--muted); font-size: 11px; }
+/* Sortable column headers. */
+.community-table th.sortable { cursor: pointer; user-select: none; }
+.community-table th.sortable:hover { color: var(--fg); }
+.community-table th .sort-ar { font-size: 9px; opacity: 0.8; }
+/* Aggregate "build time by platform" mini bar-chart, collapsed by default. */
+details.buildtime { margin: 4px 0 10px; font-size: 12px; }
+details.buildtime > summary { cursor: pointer; color: var(--muted); user-select: none; }
+details.buildtime > summary:hover { color: var(--fg); }
+.bt-chart { margin: 10px 0 4px; display: grid; grid-template-columns: max-content 1fr max-content; gap: 4px 10px; align-items: center; max-width: 560px; }
+.bt-label { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--fg); white-space: nowrap; }
+.bt-track { background: var(--soil100); border-radius: 3px; height: 12px; overflow: hidden; }
+.bt-fill { display: block; height: 100%; background: var(--earth700); border-radius: 3px; }
+.bt-num { font-family: var(--font-mono); font-size: 11px; color: var(--muted); text-align: right; white-space: nowrap; }
+/* Row hover highlights only the left label columns. The registry (npm/PyPI/
+   issue) and platform cells are intentionally excluded so their status colors
+   aren't washed out to panel2 on hover. */
+.community-table tbody tr:hover td.ext, .community-table tbody tr:hover td.row-pill, .community-table tbody tr:hover td.rel { background: var(--panel2); }
 /* Registry-presence + issue columns sit at the right end of each row.
    A small badge for each of npm / PyPI / filed-issue; click-throughs to
    the live registry page or upstream tracker. */
@@ -140,6 +175,91 @@ footer a:hover { color: #ffffff; }
 .tag-list a:hover { border-color: var(--accent); text-decoration: none; }
 .version-group { margin: 20px 0 8px; font-size: 15px; color: var(--muted); border-bottom: 1px solid var(--border); padding-bottom: 4px; }
 .err { color: #f85149; font-size: 12px; }
+
+/* Live activity feed (/activity) — a monospace tail of the webhook stream. */
+.act-head { display: flex; align-items: center; gap: 10px; margin: 8px 0 14px; flex-wrap: wrap; }
+.act-head h2 { margin: 0; }
+.live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); display: inline-block; animation: livepulse 1.8s infinite; }
+@keyframes livepulse { 0% { box-shadow: 0 0 0 0 rgba(22,163,74,.5); } 70% { box-shadow: 0 0 0 7px rgba(22,163,74,0); } 100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); } }
+.act-meta { color: var(--muted); font-size: 12px; }
+.act-list { list-style: none; margin: 0; padding: 0; font-family: var(--font-mono); font-size: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--panel); }
+/* One shared 8-column grid for the header row and every data row, so the
+   right-aligned "ran" / "queued" columns line up cleanly down the page. */
+.act-cols, .act-row { display: grid; grid-template-columns: 78px 12px 30px 160px minmax(0,1fr) 86px 64px 70px; gap: 10px; align-items: center; }
+.act-cols { padding: 4px 13px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.act-cols .r { text-align: right; }
+.act-row { padding: 4px 12px; border-bottom: 1px solid var(--border); }
+.act-row:last-child { border-bottom: none; }
+.act-row:hover { background: var(--panel2); }
+.act-time { color: var(--muted); white-space: nowrap; }
+.act-row .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--grey); }
+.act-row .dot.success { background: var(--ok); }
+.act-row .dot.failure, .act-row .dot.timed_out { background: var(--fail); }
+.act-row .dot.in_progress, .act-row .dot.queued, .act-row .dot.pending, .act-row .dot.waiting, .act-row .dot.requested { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+.act-type { color: var(--earth700); text-transform: uppercase; font-size: 9px; letter-spacing: .05em; white-space: nowrap; }
+.act-repo { color: var(--earth700); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+a.act-title:hover { color: var(--accent); text-decoration: none; }
+/* State text is color-coded by status; run/queue durations sit in their own
+   right-aligned columns so they scan as columns. */
+.act-state { color: var(--muted); font-size: 11px; white-space: nowrap; text-align: right; }
+/* State color tokens — standalone so run heads and nested job rows share them. */
+.st-success { color: var(--ok); }
+.st-failure, .st-timed_out { color: var(--fail); }
+.st-in_progress, .st-queued, .st-pending, .st-waiting, .st-requested { color: var(--warn); }
+.st-cancelled, .st-skipped, .st-neutral { color: var(--muted); }
+
+/* Run-grouped activity: each workflow run is a collapsible parent with its
+   jobs nested underneath; the run head shows the elapsed/compute/queue split. */
+.run-legend { color: var(--muted); font-size: 12px; margin: 6px 0 10px; }
+.run-legend .run-elapsed { color: var(--fg); font-weight: 600; }
+.run-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--panel); font-family: var(--font-mono); font-size: 12px; }
+.run-item { border-bottom: 1px solid var(--border); }
+.run-item:last-child { border-bottom: none; }
+.run-head { display: flex; align-items: center; gap: 10px; padding: 5px 12px; cursor: pointer; }
+.run-head:hover { background: var(--panel2); }
+.caret { width: 10px; flex: none; color: var(--muted); transition: transform .12s ease; display: inline-block; }
+.run-item.open .caret { transform: rotate(90deg); }
+.run-head .dot, .job-row .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--grey); flex: none; }
+.run-head .dot.success, .job-row .dot.success { background: var(--ok); }
+.run-head .dot.failure, .run-head .dot.timed_out, .job-row .dot.failure, .job-row .dot.timed_out { background: var(--fail); }
+.run-head .dot.in_progress, .run-head .dot.queued, .run-head .dot.pending, .run-head .dot.waiting, .run-head .dot.requested,
+.job-row .dot.in_progress, .job-row .dot.queued, .job-row .dot.pending, .job-row .dot.waiting, .job-row .dot.requested { background: var(--warn); animation: pulse 1.6s ease-in-out infinite; }
+.run-time { color: var(--muted); }
+.run-repo { color: var(--earth700); white-space: nowrap; flex: none; width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.run-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.run-title small { color: var(--muted); }
+a.run-title-link { color: var(--fg); }
+a.run-title-link:hover { color: var(--accent); }
+.run-sum { display: flex; align-items: center; gap: 12px; flex: none; }
+.run-elapsed { color: var(--fg); font-weight: 600; }
+.run-compute { color: var(--muted); }
+.run-queue { color: var(--earth700); }
+.run-jobs { list-style: none; margin: 0; padding: 2px 0 6px; background: var(--panel2); }
+.job-row { display: flex; align-items: center; gap: 10px; padding: 2px 12px 2px 36px; }
+.job-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+a.job-name:hover { color: var(--accent); }
+.job-state { width: 88px; text-align: right; font-size: 11px; color: var(--muted); }
+.job-ran { width: 64px; text-align: right; font-size: 11px; color: var(--muted); }
+.job-ran.dur-mid { color: var(--warn); font-weight: 600; }
+.job-ran.dur-hi { color: var(--fail); font-weight: 700; }
+.job-queue { width: 72px; text-align: right; font-size: 11px; color: var(--earth700); }
+@media (max-width: 700px) { .run-repo { width: 92px; } .run-sum { gap: 8px; } }
+.act-new { animation: actflash 1.6s ease-out; }
+@keyframes actflash { from { background: #fff6c9; } to { background: transparent; } }
+.act-more { display: inline-block; margin: 14px 0; color: var(--accent); cursor: pointer; }
+
+/* Actions-time insights (/insights) — Vega-Lite chart cards. */
+.insights-note { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 13px; color: var(--earth700); margin: 6px 0 4px; }
+.insights-note strong { color: var(--fg); }
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px; }
+.chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); min-width: 0; }
+.chart-card.wide { grid-column: 1 / -1; }
+.chart-card h3 { margin: 0 0 2px; font-size: 14px; }
+.chart-card .sub { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+.chart-box { width: 100%; min-height: 60px; }
+.chart-box svg { max-width: 100%; }
+@media (max-width: 860px) { .charts { grid-template-columns: 1fr; } }
 `;
 
 function escapeHtml(s) {
@@ -229,8 +349,46 @@ function fmtDuration(startIso, endIso) {
   if (!startIso) return '';
   const end = (endIso && new Date(endIso).getTime()) || Date.now();
   const sec = Math.max(0, Math.round((end - new Date(startIso).getTime()) / 1000));
-  const m = Math.floor(sec / 60), s = sec % 60;
-  return m ? `${m}m ${s}s` : `${s}s`;
+  return fmtDurationSec(sec);
+}
+
+// A job that's still running and has been for longer than this is flagged as
+// likely-stuck (the data showed a 6-hour hung leg). Tunable single knob.
+const STUCK_MIN = 90;
+
+// Mirrors the collector's RELIABILITY_WINDOW (last-N decisive runs); used only
+// for the column tooltip copy.
+const RELIABILITY_WINDOW_LABEL = 10;
+
+// Human duration showing the two largest non-zero units, so long spans read as
+// "3h 54m" rather than "234m 12s". Seconds only matter at sub-hour scale.
+function fmtDurationSec(sec) {
+  if (sec == null) return '';
+  if (sec < 60) return `${sec}s`;
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m ${s}s`;
+}
+
+function isStuckJob(j) {
+  if (!j || j.status === 'completed' || !j.startedAt) return false;
+  const ms = Date.now() - new Date(j.startedAt).getTime();
+  return Number.isFinite(ms) && ms > STUCK_MIN * 60000;
+}
+
+// Trailing " · 14m 3s" / " · 92m running ⚠ stuck" appended to a job tooltip.
+function jobTimeLabel(j) {
+  if (!j) return '';
+  if (j.durationSec != null) return ` · ${fmtDurationSec(j.durationSec)}`;
+  if (j.status !== 'completed' && j.startedAt) {
+    const sec = Math.max(0, Math.round((Date.now() - new Date(j.startedAt).getTime()) / 1000));
+    return ` · ${fmtDurationSec(sec)} running${isStuckJob(j) ? ' ⚠ stuck' : ''}`;
+  }
+  return '';
 }
 
 function head(title) {
@@ -259,7 +417,7 @@ function renderJobsList(jobs) {
     const nameTag = j.htmlUrl
       ? `<a class="name" href="${escapeHtml(j.htmlUrl)}">${escapeHtml(label)}</a>`
       : `<span class="name">${escapeHtml(label)}</span>`;
-    return `<div class="job-cell" title="${escapeHtml(j.name)} — ${escapeHtml(s.replace('_', ' '))}"><span class="dot ${cls}"></span>${nameTag}</div>`;
+    return `<div class="job-cell" title="${escapeHtml(j.name)} — ${escapeHtml(s.replace('_', ' '))}${escapeHtml(jobTimeLabel(j))}"><span class="dot ${cls}"></span>${nameTag}</div>`;
   }).join('');
   return `<div class="jobs"><div class="jobs-grid">${cells}</div></div>`;
 }
@@ -326,7 +484,8 @@ function renderRunJobs(jobs) {
       if (!j) return `<td class="cell empty">·</td>`;
       const s = statusKey(j);
       const cls = dotClassForStatusKey(s);
-      return `<td class="cell dot ${cls}" title="${escapeHtml(p)} ${escapeHtml(v)}: ${escapeHtml(s.replace('_', ' '))}"></td>`;
+      const stuck = isStuckJob(j) ? ' stuck' : '';
+      return `<td class="cell dot ${cls}${stuck}" title="${escapeHtml(p)} ${escapeHtml(v)}: ${escapeHtml(s.replace('_', ' '))}${escapeHtml(jobTimeLabel(j))}"></td>`;
     }).join('');
     return `<tr><td class="ext">${platformIcon(p)}${escapeHtml(p)}</td>${cells}</tr>`;
   }).join('');
@@ -412,7 +571,7 @@ function renderCommunityJobCell(j) {
   const nameTag = j.htmlUrl
     ? `<a class="name" href="${escapeHtml(j.htmlUrl)}">${escapeHtml(label)}</a>`
     : `<span class="name">${escapeHtml(label)}</span>`;
-  return `<div class="job-cell" title="${escapeHtml(j.name)} — ${escapeHtml(s.replace('_', ' '))}"><span class="dot ${cls}"></span>${nameTag}</div>`;
+  return `<div class="job-cell" title="${escapeHtml(j.name)} — ${escapeHtml(s.replace('_', ' '))}${escapeHtml(jobTimeLabel(j))}"><span class="dot ${cls}"></span>${nameTag}</div>`;
 }
 
 // Canonical ordering for the community matrix's platform columns. The
@@ -455,8 +614,10 @@ function renderCommunitySection(c) {
   // Index each extension's jobs by platform and aggregate stats in one pass.
   let okC = 0, failC = 0, ipC = 0, totalC = 0;
   const seenPlatforms = new Set();
+  const platTime = new Map();   // platform -> { sum, n } over timed legs, for the aggregate chart
   const indexed = exts.map(ext => {
     const byPlat = new Map();
+    let slowestSec = null;      // longest leg = build-time critical path for this ext
     for (const j of (ext.jobs || [])) {
       const plat = parseCommunityJob(j.name).platform;
       if (!plat) continue;
@@ -467,8 +628,14 @@ function renderCommunitySection(c) {
       if (s === 'success') okC++;
       else if (s === 'failure' || s === 'timed_out') failC++;
       else if (s === 'in_progress' || s === 'queued' || s === 'pending' || s === 'waiting') ipC++;
+      if (j.durationSec != null) {
+        if (slowestSec == null || j.durationSec > slowestSec) slowestSec = j.durationSec;
+        const pt = platTime.get(plat) || { sum: 0, n: 0 };
+        pt.sum += j.durationSec; pt.n++;
+        platTime.set(plat, pt);
+      }
     }
-    return { ...ext, byPlat };
+    return { ...ext, byPlat, slowestSec };
   });
 
   // Order the column list: canonical ones first (in order), then anything
@@ -476,6 +643,25 @@ function renderCommunitySection(c) {
   const known = PLATFORM_COLUMN_ORDER.filter(p => seenPlatforms.has(p));
   const extras = [...seenPlatforms].filter(p => !PLATFORM_COLUMN_ORDER.includes(p)).sort();
   const columns = [...known, ...extras];
+
+  // Aggregate "where the time goes": average build time per platform across
+  // every timed leg, sorted slowest first, drawn as a small bar chart. Build
+  // time only (started→completed) — queue wait is excluded.
+  const platAvg = columns
+    .map(p => { const pt = platTime.get(p); return { p, avg: pt && pt.n ? pt.sum / pt.n : null, n: pt ? pt.n : 0 }; })
+    .filter(x => x.avg != null)
+    .sort((a, b) => b.avg - a.avg);
+  const maxAvg = platAvg.length ? platAvg[0].avg : 1;
+  const buildTimeChart = platAvg.length
+    ? `<details class="buildtime"><summary>⏱ build time by platform — avg per leg (build only, queue excluded)</summary><div class="bt-chart">${
+        platAvg.map(x => {
+          const pct = Math.max(2, Math.round(100 * x.avg / maxAvg));
+          return `<span class="bt-label">${platformIcon(x.p)}${escapeHtml(x.p)}</span>`
+               + `<span class="bt-track"><span class="bt-fill" style="width:${pct}%"></span></span>`
+               + `<span class="bt-num">${escapeHtml(fmtDurationSec(Math.round(x.avg)))} · n=${x.n}</span>`;
+        }).join('')
+      }</div></details>`
+    : '';
 
   const sourceLink = c.sourceRunUrl
     ? `<a class="run-link" href="${escapeHtml(c.sourceRunUrl)}">build_all run</a>`
@@ -489,8 +675,10 @@ function renderCommunitySection(c) {
   const knownIssues = reg ? (reg.knownIssues || {}) : {};
 
   const head = `<thead><tr>
-      <th class="ext-head">Extension</th>
+      <th class="ext-head sortable" data-sort="name" title="Sort by extension name">Extension<span class="sort-ar"></span></th>
       <th class="ext-head">Status</th>
+      <th class="rel-head sortable" data-sort="rel" title="Sort by pass rate — last ${RELIABILITY_WINDOW_LABEL} decisive (success/failure) build.yml runs">✓ rate<span class="sort-ar"></span></th>
+      <th class="bt-head sortable" data-sort="bt" title="Sort by build time — slowest platform leg (started→completed), excludes queue wait">build<span class="sort-ar"></span></th>
       ${columns.map(p => `<th class="plat" title="${escapeHtml(p)}">${platformIcon(p)}<span class="plat-text">${escapeHtml(p)}</span></th>`).join('')}
       <th class="registry-head">npm</th>
       <th class="registry-head">PyPI</th>
@@ -513,6 +701,26 @@ function renderCommunitySection(c) {
     return `<td class="registry warn" title="${escapeHtml(i.why || 'upstream issue filed')}"><a href="${escapeHtml(i.url)}" rel="noopener" target="_blank">!</a></td>`;
   }
 
+  // Reliability ratio cell: "8/10" colored by health. All-pass = green,
+  // never-passed = red, mixed = amber. No decisive runs in window = muted dot.
+  function reliabilityCell(rel) {
+    if (!rel || !rel.total) {
+      return `<td class="rel rel-none" title="no completed runs in window">·</td>`;
+    }
+    const pct = rel.ok / rel.total;
+    const cls = pct >= 1 ? 'rel-ok' : (pct <= 0 ? 'rel-bad' : 'rel-warn');
+    return `<td class="rel ${cls}" title="passed ${rel.ok} of the last ${rel.total} decisive runs">${rel.ok}/${rel.total}</td>`;
+  }
+
+  // Build-time cell: the slowest platform leg's build duration (wall-clock
+  // critical path, queue excluded). Shaded by magnitude.
+  function buildTimeCell(sec) {
+    if (sec == null) return `<td class="bt-cell" title="no timed legs yet">·</td>`;
+    const min = sec / 60;
+    const cls = min >= 30 ? 'bt-hi' : (min >= 10 ? 'bt-mid' : 'bt-lo');
+    return `<td class="bt-cell ${cls}" title="slowest leg: ${fmtDurationSec(sec)} build (excludes queue)">${fmtDurationSec(sec)}</td>`;
+  }
+
   // Per-cell HTML kept tight: a single <td> with the status class and a
   // short title= attribute for hover. 242 extensions × ~11 columns means
   // ~2700 cells — each saved byte cuts ~3KB off the served page. The
@@ -523,8 +731,10 @@ function renderCommunitySection(c) {
       if (!j) return `<td class="cell empty">·</td>`;
       const s = statusKey(j);
       const cls = dotClassForStatusKey(s);
-      // Title omits the extension name (already in the row) — just plat+status.
-      return `<td class="cell dot ${cls}" title="${escapeHtml(p)}: ${escapeHtml(s.replace('_', ' '))}"></td>`;
+      const stuck = isStuckJob(j) ? ' stuck' : '';
+      // Title omits the extension name (already in the row) — plat + status +
+      // build duration (or running time for in-flight legs).
+      return `<td class="cell dot ${cls}${stuck}" title="${escapeHtml(p)}: ${escapeHtml(s.replace('_', ' '))}${escapeHtml(jobTimeLabel(j))}"></td>`;
     }).join('');
     const extPresence = presence[ext.name] || {};
     const regCells = registryCell(extPresence.npm, 'npm')
@@ -537,7 +747,11 @@ function renderCommunitySection(c) {
       ? `<a href="${escapeHtml(ext.run.htmlUrl)}">${escapeHtml(ext.name)}</a>`
       : escapeHtml(ext.name);
     const pillCell = ext.run ? pillFor(ext.run) : `<span class="pill" style="background:#21262d;color:#8b949e">—</span>`;
-    return `<tr><td class="ext">${nameCell}</td><td class="row-pill">${pillCell}</td>${cells}${regCells}</tr>`;
+    // Sort keys: name (lexical), rel (pass-rate ratio), bt (slowest-leg seconds).
+    // Missing numeric values get -1 so they sink to the bottom on a desc sort.
+    const relVal = (ext.reliability && ext.reliability.total) ? (ext.reliability.ok / ext.reliability.total) : -1;
+    const btVal = ext.slowestSec != null ? ext.slowestSec : -1;
+    return `<tr data-name="${escapeHtml(ext.name)}" data-rel="${relVal}" data-bt="${btVal}"><td class="ext">${nameCell}</td><td class="row-pill">${pillCell}</td>${reliabilityCell(ext.reliability)}${buildTimeCell(ext.slowestSec)}${cells}${regCells}</tr>`;
   }).join('')}</tbody>`;
 
   return `<section class="repo">
@@ -550,13 +764,39 @@ function renderCommunitySection(c) {
         ${c.unattributedInflight ? `<span title="build.yml runs queued/in progress without an extension_name input — can't map to a specific extension. Dispatch with extension_name (run-name '🐤 &lt;ext&gt;') to label them.">⟳ ${c.unattributedInflight}${c.scannedRuns >= 100 ? '+' : ''} building (unlabeled)</span>` : ''}
       </span>
     </div>
+    ${buildTimeChart}
     <div class="community-table-wrap">
-      <table class="community-table">
+      <table class="community-table" id="community-table">
         ${head}
         ${body}
       </table>
     </div>
+    ${communitySortScript()}
   </section>`;
+}
+
+// Client-side sort for the community matrix. Clicking a sortable header
+// reorders the tbody rows by that column's data-* key (name lexical; rel/bt
+// numeric). Re-clicking toggles direction. Numeric columns default to
+// descending (worst/largest first), name to ascending.
+function communitySortScript() {
+  return `<script>(function(){
+  var tbl=document.getElementById('community-table'); if(!tbl||!tbl.tBodies[0]) return;
+  var tb=tbl.tBodies[0], cur={key:null,dir:1};
+  function val(tr,key){ var v=tr.getAttribute('data-'+key); if(key==='name') return v||''; var n=parseFloat(v); return isNaN(n)?-Infinity:n; }
+  function clearArrows(){ Array.prototype.forEach.call(tbl.querySelectorAll('thead th.sortable .sort-ar'), function(s){ s.textContent=''; }); }
+  Array.prototype.forEach.call(tbl.querySelectorAll('thead th.sortable'), function(th){
+    th.addEventListener('click', function(){
+      var key=th.getAttribute('data-sort');
+      cur.dir = (cur.key===key) ? -cur.dir : (key==='name'?1:-1);
+      cur.key=key;
+      var rows=Array.prototype.slice.call(tb.querySelectorAll('tr'));
+      rows.sort(function(a,b){ var x=val(a,key), y=val(b,key); if(key==='name') return cur.dir*String(x).localeCompare(String(y)); return cur.dir*(x-y); });
+      var frag=document.createDocumentFragment(); rows.forEach(function(r){ frag.appendChild(r); }); tb.appendChild(frag);
+      clearArrows(); var ar=th.querySelector('.sort-ar'); if(ar) ar.textContent = cur.dir>0 ? ' ▲' : ' ▼';
+    });
+  });
+})();<\/script>`;
 }
 
 function renderSidePanel(side) {
@@ -670,7 +910,7 @@ ${PLAT_SPRITE}
     <a href="/" aria-label="haybarn-status"><img src="${LOGO_URL}" alt="" /></a>
     <h1><a href="/">haybarn-status</a><span class="tag mono">${escapeHtml(view.tag)}</span></h1>
   </div>
-  <div class="meta">as of ${escapeHtml(view.fetchedAt)} · <a href="">refresh</a> · <a href="/api/r/${encodeURIComponent(view.tag)}">json</a> · <button id="snd" class="snd-toggle" type="button">🔕 sounds off</button></div>
+  <div class="meta">as of ${escapeHtml(view.fetchedAt)} · <a href="">refresh</a> · <a href="/activity">activity</a> · <a href="/api/r/${encodeURIComponent(view.tag)}">json</a> · <button id="snd" class="snd-toggle" type="button">🔕 sounds off</button></div>
 </header>
 <main>
   ${sections}
@@ -696,10 +936,14 @@ export function renderIndex(tagsView) {
     if (b === 'other') return -1;
     return b.localeCompare(a, undefined, { numeric: true });
   });
+  const published = tagsView.published || {};
   const sections = versions.map(v => {
-    const links = groups.get(v).map(t =>
-      `<a href="/r/${encodeURIComponent(t)}" class="mono">${escapeHtml(t)}</a>`
-    ).join('');
+    const links = groups.get(v).map(t => {
+      const when = published[t]
+        ? ` <small style="color:var(--muted);font-weight:400"> · published ${escapeHtml(fmtRelative(published[t]))}</small>`
+        : '';
+      return `<a href="/r/${encodeURIComponent(t)}" class="mono">${escapeHtml(t)}${when}</a>`;
+    }).join('');
     const heading = v === 'other' ? 'other' : `v${escapeHtml(v)}`;
     return `<h3 class="version-group">${heading}</h3><div class="tag-list">${links}</div>`;
   }).join('');
@@ -710,13 +954,253 @@ export function renderIndex(tagsView) {
     <img src="${LOGO_URL}" alt="" />
     <h1>haybarn-status</h1>
   </div>
-  <div class="meta">CI status across the Haybarn project, powered by DuckDB · as of ${escapeHtml(tagsView.fetchedAt)}</div>
+  <div class="meta">CI status across the Haybarn project, powered by DuckDB · <a href="/activity">live activity ›</a> · <a href="/insights">insights ›</a> · as of ${escapeHtml(tagsView.fetchedAt)}</div>
 </header>
 <main>
   <h2>Releases</h2>
   ${sections || '<div class="empty">no haybarn-v* tags discovered yet</div>'}
 </main>
 <footer>${escapeHtml(DISCLAIMER)} · <a href="https://github.com/Query-farm-haybarn">github.com/Query-farm-haybarn</a></footer>
+</body></html>`;
+}
+
+// ---- Live activity feed (/activity) ---------------------------------------
+
+const ACT_TYPE_LABEL = { workflow_run: 'run', workflow_job: 'job', release: 'rel' };
+
+// Drop the org prefix and the redundant `haybarn-` so the distinguishing part
+// (community-extensions, extension-ci-tools, wasm, …) is what shows. The engine
+// repo is exactly `haybarn`, which is left intact.
+function shortRepo(full) {
+  return String(full || '').replace(/^Query-farm-haybarn\//, '').replace(/^haybarn-/, '');
+}
+
+
+// Pick the status token an activity row should color its dot by.
+function activityDotClass(ev) {
+  const s = ev.status === 'completed' ? (ev.conclusion || 'neutral') : (ev.status || '');
+  return dotClassForStatusKey(s);
+}
+
+// Human label for the row's right-hand state column.
+function activityStateText(ev) {
+  if (ev.type === 'release') return ev.action || 'release';
+  const s = ev.status === 'completed' ? (ev.conclusion || 'completed') : (ev.status || ev.action || '');
+  return String(s).replace('_', ' ');
+}
+
+// HH:MM:SS in UTC — a stable clock for a tail (no per-second restyling).
+function clockUTC(ms) {
+  return new Date(ms).toISOString().slice(11, 19);
+}
+
+// Magnitude class for a run duration: <10m normal, 10–30m amber, ≥30m red.
+function durMagClass(sec) {
+  if (sec == null) return '';
+  const m = sec / 60;
+  return m >= 30 ? 'dur-hi' : (m >= 10 ? 'dur-mid' : 'dur-lo');
+}
+
+// One nested job line under a run: state dot, name, state, run time, queue.
+function renderActivityJob(j) {
+  const k = activityDotClass(j);
+  const name = j.name || '(job)';
+  const nameHtml = j.url
+    ? `<a class="job-name" href="${escapeHtml(j.url)}" target="_blank" rel="noopener">${escapeHtml(name)}</a>`
+    : `<span class="job-name">${escapeHtml(name)}</span>`;
+  const ran = j.durationSec != null ? escapeHtml(fmtDurationSec(j.durationSec)) : '';
+  const q = j.queueSec != null ? escapeHtml(fmtDurationSec(j.queueSec)) : '';
+  return `<li class="job-row"><span class="dot ${k}"></span>${nameHtml}`
+    + `<span class="job-state st-${k}">${escapeHtml(activityStateText(j))}</span>`
+    + `<span class="job-ran ${durMagClass(j.durationSec)}" title="run time">${ran}</span>`
+    + `<span class="job-queue" title="queue wait">${q}</span></li>`;
+}
+
+// A workflow run with its nested jobs. The run head carries the time breakdown:
+// ⏱ elapsed (wall-clock), Σ compute (sum of job run-times), ◷ max queue (the
+// longest a job sat waiting) — so an "8h" elapsed reads honestly as mostly wait.
+function renderRunItem(run) {
+  const k = activityDotClass(run);
+  const ts = new Date(run.updatedAt || run.createdAt || Date.now()).getTime();
+  const titleHtml = run.url
+    ? `<a class="run-title-link" href="${escapeHtml(run.url)}" target="_blank" rel="noopener">${escapeHtml(run.title || '(run)')}</a>`
+    : escapeHtml(run.title || '(run)');
+  const maxq = run.maxQueueSec != null
+    ? `<span class="run-queue" title="longest a job sat queued">◷ ${escapeHtml(fmtDurationSec(run.maxQueueSec))}</span>` : '';
+  const jobs = (run.jobs || []).map(renderActivityJob).join('')
+    || `<li class="job-row"><span class="job-name" style="color:var(--muted)">no jobs recorded</span></li>`;
+  return `<li class="run-item" data-id="${run.runId}">`
+    + `<div class="run-head">`
+      + `<span class="caret">▸</span>`
+      + `<span class="act-time" data-ts="${ts}" title="${escapeHtml(String(run.updatedAt || ''))} UTC">${escapeHtml(fmtRelative(run.updatedAt || run.createdAt))}</span>`
+      + `<span class="dot ${k}"></span>`
+      + `<span class="run-repo" title="${escapeHtml(run.repo || '')}">${escapeHtml(shortRepo(run.repo))}</span>`
+      + `<span class="run-title">${titleHtml} <small>#${run.runNumber || ''} · ${run.jobCount} job${run.jobCount === 1 ? '' : 's'}</small></span>`
+      + `<span class="run-sum">`
+        + `<span class="act-state st-${k}">${escapeHtml(activityStateText(run))}</span>`
+        + `<span class="run-elapsed" title="wall-clock elapsed (created→updated)">⏱ ${escapeHtml(run.elapsedSec != null ? fmtDurationSec(run.elapsedSec) : '—')}</span>`
+        + `<span class="run-compute" title="Σ job run-times (compute)">Σ ${escapeHtml(run.computeSec ? fmtDurationSec(run.computeSec) : '—')}</span>`
+        + maxq
+      + `</span>`
+    + `</div>`
+    + `<ul class="run-jobs" hidden>${jobs}</ul>`
+    + `</li>`;
+}
+
+// Client: poll /api/activity, re-render the run list (expand state preserved),
+// expand/collapse via delegation, tick ages. Mirrors the server builders above.
+function activityScript() {
+  return `<script>(function(){
+  var POLL=5000;
+  var list=document.getElementById('runlist'), meta=document.getElementById('actmeta');
+  if(!list) return;
+  var open={};
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  function shortRepo(r){ return String(r||'').replace(/^Query-farm-haybarn\\//,'').replace(/^haybarn-/,''); }
+  var KNOWN=['success','failure','timed_out','in_progress','queued','waiting','requested','pending','cancelled','skipped','neutral'];
+  function dotCls(o){ var s = o.status==='completed' ? (o.conclusion||'neutral') : (o.status||''); return KNOWN.indexOf(s)>=0?s:''; }
+  function stateTxt(o){ var s = o.status==='completed' ? (o.conclusion||'completed') : (o.status||''); return String(s).replace('_',' '); }
+  function rel(ms){ var s=Math.round((Date.now()-ms)/1000); if(s<5)return 'just now'; if(s<60)return s+'s ago'; if(s<3600)return Math.round(s/60)+'m ago'; if(s<86400)return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }
+  function dur(sec){ if(sec==null)return ''; if(sec<60)return sec+'s'; var d=Math.floor(sec/86400),h=Math.floor((sec%86400)/3600),m=Math.floor((sec%3600)/60),s=sec%60; if(d)return d+'d '+h+'h'; if(h)return h+'h '+m+'m'; return m+'m '+s+'s'; }
+  function durMag(sec){ if(sec==null)return ''; var m=sec/60; return m>=30?'dur-hi':(m>=10?'dur-mid':'dur-lo'); }
+  function jobHtml(j){ var k=dotCls(j);
+    return '<li class="job-row"><span class="dot '+k+'"></span>'
+      +(j.url?'<a class="job-name" href="'+esc(j.url)+'" target="_blank" rel="noopener">'+esc(j.name||'(job)')+'</a>':'<span class="job-name">'+esc(j.name||'(job)')+'</span>')
+      +'<span class="job-state st-'+k+'">'+esc(stateTxt(j))+'</span>'
+      +'<span class="job-ran '+durMag(j.durationSec)+'">'+esc(dur(j.durationSec))+'</span>'
+      +'<span class="job-queue">'+esc(dur(j.queueSec))+'</span></li>'; }
+  function runHtml(run){ var k=dotCls(run), ts=new Date(run.updatedAt||run.createdAt||Date.now()).getTime();
+    var jobs=(run.jobs||[]).map(jobHtml).join('')||'<li class="job-row"><span class="job-name" style="color:var(--muted)">no jobs recorded</span></li>';
+    var maxq = run.maxQueueSec!=null ? '<span class="run-queue" title="longest a job sat queued">◷ '+esc(dur(run.maxQueueSec))+'</span>' : '';
+    var isOpen=open[run.runId];
+    return '<li class="run-item'+(isOpen?' open':'')+'" data-id="'+run.runId+'">'
+      +'<div class="run-head">'
+        +'<span class="caret">▸</span>'
+        +'<span class="act-time" data-ts="'+ts+'" title="'+esc(String(run.updatedAt||''))+' UTC">'+esc(rel(ts))+'</span>'
+        +'<span class="dot '+k+'"></span>'
+        +'<span class="run-repo" title="'+esc(run.repo||'')+'">'+esc(shortRepo(run.repo))+'</span>'
+        +'<span class="run-title">'+(run.url?'<a class="run-title-link" href="'+esc(run.url)+'" target="_blank" rel="noopener">'+esc(run.title||'(run)')+'</a>':esc(run.title||'(run)'))+' <small>#'+(run.runNumber||'')+' · '+run.jobCount+' job'+(run.jobCount===1?'':'s')+'</small></span>'
+        +'<span class="run-sum">'
+          +'<span class="act-state st-'+k+'">'+esc(stateTxt(run))+'</span>'
+          +'<span class="run-elapsed" title="wall-clock elapsed">⏱ '+esc(run.elapsedSec!=null?dur(run.elapsedSec):'—')+'</span>'
+          +'<span class="run-compute" title="sum of job run-times (compute)">Σ '+esc(run.computeSec?dur(run.computeSec):'—')+'</span>'
+          +maxq
+        +'</span>'
+      +'</div>'
+      +'<ul class="run-jobs"'+(isOpen?'':' hidden')+'>'+jobs+'</ul></li>'; }
+  function render(runs){ list.innerHTML = runs.length ? runs.map(runHtml).join('') : '<li class="run-item"><div class="run-head"><span class="run-title" style="color:var(--muted)">no recent runs</span></div></li>'; }
+  list.addEventListener('click', function(e){
+    if(e.target.closest && e.target.closest('a')) return;
+    var head = e.target.closest && e.target.closest('.run-head'); if(!head) return;
+    var item=head.parentNode, id=item.getAttribute('data-id'), nowOpen=!item.classList.contains('open');
+    item.classList.toggle('open', nowOpen);
+    var jl=item.querySelector('.run-jobs'); if(jl) jl.hidden=!nowOpen;
+    if(nowOpen) open[id]=1; else delete open[id];
+  });
+  function tickAges(){ Array.prototype.forEach.call(list.querySelectorAll('.act-time[data-ts]'), function(el){ el.textContent=rel(+el.getAttribute('data-ts')); }); }
+  setInterval(tickAges,1000);
+  function poll(){ if(document.hidden){ setTimeout(poll,POLL); return; }
+    fetch('/api/activity',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+      render(d.runs||[]);
+      meta.textContent='live · updated '+new Date().toISOString().slice(11,19)+' UTC';
+      setTimeout(poll,POLL);
+    }).catch(function(){ meta.textContent='reconnecting…'; setTimeout(poll,POLL); });
+  }
+  setTimeout(poll,POLL);
+})();<\/script>`;
+}
+
+export function renderActivityPage(view) {
+  const runs = view.runs || [];
+  const items = runs.map(renderRunItem).join('');
+  const empty = `<li class="run-item"><div class="run-head"><span class="run-title" style="color:var(--muted)">no recent runs</span></div></li>`;
+  return `${head('activity — haybarn-status')}
+<body>
+<header>
+  <div class="brand">
+    <a href="/" aria-label="haybarn-status"><img src="${LOGO_URL}" alt="" /></a>
+    <h1><a href="/">haybarn-status</a><span class="tag mono">activity</span></h1>
+  </div>
+  <div class="meta"><a href="/">← all releases</a> · <a href="/insights">insights</a> · <a href="/api/activity">json</a></div>
+</header>
+<main>
+  <div class="act-head">
+    <span class="live-dot"></span>
+    <h2>Build activity</h2>
+    <span class="act-meta" id="actmeta">live · recent workflow runs · times UTC</span>
+  </div>
+  <div class="run-legend">click a run to expand its jobs · <span class="run-elapsed">⏱ elapsed</span> wall-clock · <span class="run-compute">Σ compute</span> sum of run-times · <span class="run-queue">◷ max queue</span> longest a job waited</div>
+  ${view.error ? `<div class="err">${escapeHtml(view.error)}</div>` : ''}
+  <ul class="run-list" id="runlist">${items || empty}</ul>
+</main>
+<footer>${escapeHtml(DISCLAIMER)} · <a href="https://github.com/Query-farm-haybarn">github.com/Query-farm-haybarn</a></footer>
+${activityScript()}
+</body></html>`;
+}
+
+// ---- Actions-time insights (/insights) ------------------------------------
+
+function insightsScript(dataJson) {
+  return `<script>
+  var D = ${dataJson};
+  var CFG = { font:'Inter, ui-sans-serif, sans-serif', axis:{labelColor:'#705e41',titleColor:'#705e41',gridColor:'#e8e4df',domainColor:'#d3cab9',tickColor:'#d3cab9'}, view:{stroke:null}, legend:{labelColor:'#3d342a',titleColor:'#705e41'} };
+  var OUTCOME = { domain:['success','failure','cancelled','skipped','(running)'], range:['#16a34a','#dc2626','#cab89d','#e8e4df','#d97706'] };
+  function go(id, spec){ var el=document.getElementById(id); if(!el) return; spec.width='container'; spec.background='transparent'; spec.config=CFG; spec['$schema']='https://vega.github.io/schema/vega-lite/v5.json'; vegaEmbed('#'+id, spec, {actions:false, renderer:'svg'}).catch(function(e){ el.innerHTML='<span class="err">chart failed to render</span>'; }); }
+  go('c_repo', { data:{values:D.byRepo}, mark:{type:'bar', color:'#725843', cornerRadiusEnd:3}, height:{step:24}, encoding:{ y:{field:'repo',type:'nominal',sort:'-x',axis:{title:null}}, x:{field:'run_min',type:'quantitative',axis:{title:'minutes'}}, tooltip:[{field:'repo'},{field:'run_min',title:'minutes'},{field:'jobs'},{field:'avg_min',title:'avg min/job'}] }});
+  go('c_outcome', { data:{values:D.byConclusion}, mark:{type:'arc', innerRadius:55}, height:230, encoding:{ theta:{field:'run_min',type:'quantitative'}, color:{field:'outcome',type:'nominal',scale:OUTCOME,legend:{title:null}}, tooltip:[{field:'outcome'},{field:'run_min',title:'minutes'},{field:'jobs'}] }});
+  go('c_jobs', { data:{values:D.topJobs}, mark:{type:'bar', color:'#725843', cornerRadiusEnd:3}, height:{step:18}, encoding:{ y:{field:'label',type:'nominal',sort:'-x',axis:{title:null,labelLimit:360}}, x:{field:'run_min',type:'quantitative',axis:{title:'total minutes'}}, tooltip:[{field:'name',title:'job'},{field:'repo'},{field:'run_min',title:'minutes'},{field:'jobs'}] }});
+  go('c_day', { data:{values:D.byDay}, mark:{type:'bar', color:'#725843'}, height:230, encoding:{ x:{field:'day',type:'temporal',axis:{title:null,format:'%b %d'}}, y:{field:'run_min',type:'quantitative',axis:{title:'minutes'}}, tooltip:[{field:'day'},{field:'run_min',title:'minutes'},{field:'jobs'}] }});
+<\/script>`;
+}
+
+export function renderInsightsPage(view) {
+  const repoShort = r => shortRepo(r) || '(unknown)';
+  const byRepo = (view.byRepo || []).map(r => ({ repo: repoShort(r.repo), run_min: r.run_min, jobs: r.jobs, avg_min: r.avg_min }));
+  const byConclusion = (view.byConclusion || []).map(r => ({ outcome: r.conclusion, run_min: r.run_min, jobs: r.jobs }));
+  const byDay = (view.byDay || []).map(r => ({ day: r.day, run_min: r.run_min, jobs: r.jobs }));
+  const topJobs = (view.topJobs || []).map(r => ({
+    label: `${repoShort(r.repo)} · ${String(r.name || '')}`.slice(0, 72),
+    name: r.name, repo: repoShort(r.repo), run_min: r.run_min, jobs: r.jobs,
+  }));
+  const data = JSON.stringify({ byRepo, byConclusion, byDay, topJobs });
+
+  const totalMin = byRepo.reduce((s, r) => s + (r.run_min || 0), 0);
+  const fmtHrs = m => (m >= 60 ? `${(m / 60).toFixed(1)}h` : `${Math.round(m)}m`);
+  const range = (view.rangeStart && view.rangeEnd)
+    ? `${escapeHtml(view.rangeStart.slice(0, 10))} → ${escapeHtml(view.rangeEnd.slice(0, 10))}`
+    : '—';
+  const cancelled = byConclusion.find(c => c.outcome === 'cancelled');
+  const cancelPct = (cancelled && totalMin) ? Math.round(100 * cancelled.run_min / totalMin) : 0;
+  const note = view.error
+    ? `<div class="err">${escapeHtml(view.error)}</div>`
+    : (cancelled && cancelPct >= 20
+        ? `<div class="insights-note">⚠ <strong>${cancelPct}%</strong> of measured compute (${fmtHrs(cancelled.run_min)}) went to <strong>cancelled</strong> jobs — re-dispatches superseding in-flight builds. Total: ${fmtHrs(totalMin)} over ${range}.</div>`
+        : `<div class="insights-note">Total measured compute: <strong>${fmtHrs(totalMin)}</strong> over ${range}.</div>`);
+
+  return `${head('insights — haybarn-status')}
+<body>
+<header>
+  <div class="brand">
+    <a href="/" aria-label="haybarn-status"><img src="${LOGO_URL}" alt="" /></a>
+    <h1><a href="/">haybarn-status</a><span class="tag mono">insights</span></h1>
+  </div>
+  <div class="meta"><a href="/">← all releases</a> · <a href="/activity">activity</a> · <a href="/api/insights">json</a></div>
+</header>
+<main>
+  <div class="act-head"><h2>Where the Actions time goes</h2><span class="act-meta">run time = job execution (compute); queue wait excluded</span></div>
+  ${note}
+  <div class="charts">
+    <div class="chart-card"><h3>Compute by repo</h3><div class="sub">total job-minutes</div><div class="chart-box" id="c_repo"></div></div>
+    <div class="chart-card"><h3>Compute by outcome</h3><div class="sub">minutes per conclusion — cancelled = wasted</div><div class="chart-box" id="c_outcome"></div></div>
+    <div class="chart-card wide"><h3>Top 25 jobs by total run time</h3><div class="sub">where the minutes concentrate</div><div class="chart-box" id="c_jobs"></div></div>
+    <div class="chart-card wide"><h3>Compute per day</h3><div class="sub">job-minutes by day started</div><div class="chart-box" id="c_day"></div></div>
+  </div>
+</main>
+<footer>${escapeHtml(DISCLAIMER)} · <a href="https://github.com/Query-farm-haybarn">github.com/Query-farm-haybarn</a></footer>
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+${insightsScript(data)}
 </body></html>`;
 }
 

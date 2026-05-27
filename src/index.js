@@ -1,9 +1,9 @@
 import {
   buildRcView, buildForks, buildCommunityMatrix, listEngineTags,
   buildRegistryPresence, buildR2Presence, buildCoreCatalog,
-  buildUpstreamPresence,
+  buildUpstreamPresence, buildActivity, buildActionsInsights,
 } from './collect.js';
-import { renderIndex, renderRcPage, renderError } from './render.js';
+import { renderIndex, renderRcPage, renderError, renderActivityPage, renderInsightsPage } from './render.js';
 import { DISCLAIMER, TAG_PREFIX, DEFAULT_VERSION, parseVersionFromTag } from './repos.js';
 
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#161b22"/><text x="16" y="22" font-family="ui-monospace,Menlo,monospace" font-size="18" font-weight="700" fill="#58a6ff" text-anchor="middle">h</text></svg>`;
@@ -211,6 +211,24 @@ async function handleIndex(env, ctx) {
   return html(renderIndex(tags));
 }
 
+// Live activity feed — a tail of the webhook stream. Not cached (the whole
+// point is freshness); the client polls /api/activity on an interval. `before`
+// (a row's receivedAt) pages backwards into history.
+async function handleActivity(env, url, asJson) {
+  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 30, 1), 100);
+  const data = await buildActivity(env, limit);
+  return asJson
+    ? json(data, { headers: { 'cache-control': 'no-store' } })
+    : html(renderActivityPage(data), { headers: { 'cache-control': 'no-store' } });
+}
+
+// Actions-time insights — Vega-Lite charts over the aggregated job stats.
+// Cached briefly; the aggregation is cheap but stable minute to minute.
+async function handleInsights(env, ctx, asJson) {
+  const data = await getCached(env, ctx, 'insights', 120, 900, () => buildActionsInsights(env));
+  return asJson ? json(data) : html(renderInsightsPage(data));
+}
+
 // Cron handler — refresh the most-expensive caches on a schedule so
 // human visits never see a cold miss. Fires per the [triggers] crons
 // in wrangler.toml. Errors are non-fatal (logged + swallowed) so a
@@ -293,6 +311,10 @@ export default {
         });
       }
       if (pathname === '/') return handleIndex(env, ctx);
+      if (pathname === '/activity') return handleActivity(env, url, false);
+      if (pathname === '/api/activity') return handleActivity(env, url, true);
+      if (pathname === '/insights') return handleInsights(env, ctx, false);
+      if (pathname === '/api/insights') return handleInsights(env, ctx, true);
 
       const rcMatch = pathname.match(/^\/r\/([^/]+)\/?$/);
       if (rcMatch) return handleRcPage(env, ctx, decodeURIComponent(rcMatch[1]), false);

@@ -9,7 +9,17 @@ import {
 import { enumerateCatalog } from './catalog.js';
 
 function summarizeJob(j) {
-  return { name: j.name, status: j.status, conclusion: j.conclusion, htmlUrl: j.html_url };
+  // Duration in seconds when the job has both timestamps; the renderer uses
+  // it for per-leg build-time tooltips and stuck-job detection.
+  const startMs = j.started_at ? Date.parse(j.started_at) : NaN;
+  const endMs = j.completed_at ? Date.parse(j.completed_at) : NaN;
+  const durationSec = Number.isFinite(startMs) && Number.isFinite(endMs)
+    ? Math.max(0, Math.round((endMs - startMs) / 1000))
+    : null;
+  return {
+    name: j.name, status: j.status, conclusion: j.conclusion, htmlUrl: j.html_url,
+    startedAt: j.started_at, completedAt: j.completed_at, durationSec,
+  };
 }
 
 function summarizeRun(r, jobs) {
@@ -65,12 +75,63 @@ export async function buildRcView(env, tag) {
   };
 }
 
+// Recent build activity for the live page — grouped by workflow run with its
+// nested jobs, so the run→job topology is visible and the wall-clock "8h" can
+// be broken into elapsed vs Σ-compute vs max-queue.
+export async function buildActivity(env, limit = 30) {
+  try {
+    const runs = await env.FEED.recentRunActivity(limit);
+    return { fetchedAt: new Date().toISOString(), runs, _disclaimer: DISCLAIMER };
+  } catch (e) {
+    return { fetchedAt: new Date().toISOString(), runs: [], error: String(e.message || e), _disclaimer: DISCLAIMER };
+  }
+}
+
+// Aggregate Actions-time stats for the /insights charts. Cheap fixed-size
+// result sets computed in the DO; we just pass them through (+ a fetch stamp).
+export async function buildActionsInsights(env) {
+  try {
+    const stats = await env.FEED.actionsTimeStats();
+    return { fetchedAt: new Date().toISOString(), ...stats, _disclaimer: DISCLAIMER };
+  } catch (e) {
+    return {
+      fetchedAt: new Date().toISOString(), error: String(e.message || e),
+      byRepo: [], byConclusion: [], byDay: [], topJobs: [], _disclaimer: DISCLAIMER,
+    };
+  }
+}
+
 export async function listEngineTags(env) {
-  const path = `/repos/${ORG}/haybarn/git/matching-refs/${TAG_REF_PATH}`;
-  const refs = await ghFetch(env, path);
-  const tags = refs.map(r => r.ref.replace('refs/tags/', ''));
-  tags.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-  return { fetchedAt: new Date().toISOString(), tags, _disclaimer: DISCLAIMER };
+  // Primary source: tags materialized from release/create webhooks in the
+  // collector — gives us each tag's publish time for "published Xh ago" and
+  // avoids a GitHub API call in steady state. The git/matching-refs API is a
+  // completeness backstop, since the webhook history only reaches back to when
+  // the collector went live (older tags wouldn't have a create/release event).
+  let feedTags = [];
+  try {
+    feedTags = await env.FEED.listTags(`${ORG}/haybarn`, TAG_PREFIX);
+  } catch (e) {
+    console.log('FEED.listTags failed:', e?.message || e);
+  }
+
+  let apiTags = [];
+  try {
+    const refs = await ghFetch(env, `/repos/${ORG}/haybarn/git/matching-refs/${TAG_REF_PATH}`);
+    apiTags = refs.map(r => r.ref.replace('refs/tags/', ''));
+  } catch (e) {
+    // Non-fatal: if the API is unavailable we still have the feed tags.
+    console.log('matching-refs failed:', e?.message || e);
+  }
+
+  const publishedByTag = {};
+  for (const t of feedTags) {
+    if (t.published_at) publishedByTag[t.tag] = t.published_at;
+  }
+
+  const tags = [...new Set([...feedTags.map(t => t.tag), ...apiTags])]
+    .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+
+  return { fetchedAt: new Date().toISOString(), tags, published: publishedByTag, _disclaimer: DISCLAIMER };
 }
 
 export async function buildForks(env) {
@@ -151,6 +212,11 @@ async function buildMatrixFromBuildAll(env) {
       status: j.status,
       conclusion: j.conclusion,
       html_url: j.html_url,
+      // Carry timing so summarizeJob can derive per-leg build time (the
+      // build_all fan-out is the primary community source; without these the
+      // build-time view would be empty for most extensions).
+      started_at: j.started_at,
+      completed_at: j.completed_at,
     });
   }
 
@@ -476,6 +542,30 @@ async function listRecentCommunityRuns(env) {
   );
 }
 
+// Per-extension reliability over the last N decisive runs, reduced in the DO
+// from full build.yml history. Returns { extName -> { ok, total } } so the
+// matrix can flag extensions that are chronically red vs flaky vs healthy —
+// invisible in the latest-run-only view. Best-effort: empty map on failure.
+async function communityReliabilityMap(env) {
+  const out = {};
+  let rows = [];
+  try {
+    rows = await env.FEED.reliabilityForWorkflow(
+      `${ORG}/${COMMUNITY_REPO.repo}`, COMMUNITY_REPO.branch, COMMUNITY_REPO.workflowFile,
+    );
+  } catch (e) {
+    console.log('FEED.reliabilityForWorkflow failed:', e?.message || e);
+    return out;
+  }
+  for (const r of rows) {
+    const ext = extensionFromDisplayTitle(r.display_title);
+    if (!ext) continue;
+    const total = (r.ok || 0) + (r.fail || 0);
+    if (total > 0) out[ext] = { ok: r.ok || 0, total };
+  }
+  return out;
+}
+
 export async function buildCommunityMatrix(env) {
   // Canonical catalog enumeration — every extensions/<name>/ subdir in the
   // haybarn-community-extensions repo, with parsed description.yml metadata
@@ -488,6 +578,9 @@ export async function buildCommunityMatrix(env) {
   } catch (e) {
     console.log('enumerateCatalog failed:', e?.message || e);
   }
+
+  // Reliability ratios (last-N pass rate per extension) from build.yml history.
+  const reliability = await communityReliabilityMap(env);
 
   // Prefer build_all source when it has substantive data: that single
   // workflow run captures every extension built across the catalog.
@@ -590,6 +683,7 @@ export async function buildCommunityMatrix(env) {
         repo: c.repo,
         run: r?.run ?? null,
         jobs: r?.jobs ?? null,
+        reliability: reliability[c.name] ?? null,
       };
     });
     // Surface anything CI saw but the catalog didn't (shouldn't happen, but
@@ -602,6 +696,7 @@ export async function buildCommunityMatrix(env) {
           version: null, commitSha: null, description: null,
           license: null, language: null, repo: null,
           run: r.run, jobs: r.jobs,
+          reliability: reliability[r.name] ?? null,
         });
       }
     }
@@ -613,6 +708,7 @@ export async function buildCommunityMatrix(env) {
       version: null, commitSha: null, description: null,
       license: null, language: null, repo: null,
       run: r.run, jobs: r.jobs,
+      reliability: reliability[r.name] ?? null,
     }));
   }
 
