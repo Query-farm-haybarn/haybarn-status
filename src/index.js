@@ -1,7 +1,7 @@
 import {
   buildRcView, buildForks, buildCommunityMatrix, listEngineTags,
   buildRegistryPresence, buildR2Presence, buildCoreCatalog,
-  buildUpstreamPresence, buildActivity, buildActionsInsights,
+  buildActivity, buildActionsInsights,
 } from './collect.js';
 import { renderIndex, renderRcPage, renderError, renderActivityPage, renderInsightsPage } from './render.js';
 import { DISCLAIMER, TAG_PREFIX, DEFAULT_VERSION, parseVersionFromTag } from './repos.js';
@@ -115,58 +115,15 @@ async function handleRcPage(env, ctx, tag, asJson) {
     } catch (e) { console.log('r2-presence sync compute failed:', e?.message || e); }
   }
 
-  // Upstream community-extensions presence — for side-by-side comparison.
-  let upstreamCommunityPresence = null;
-  try {
-    const cached = await env.STATUS_KV.get(`upstream-community-presence:${version}`, { type: 'json' });
-    if (cached && cached.data) upstreamCommunityPresence = cached.data;
-  } catch (_) {}
-  if (!upstreamCommunityPresence && extensionNames.length) {
-    try {
-      upstreamCommunityPresence = await buildUpstreamPresence(env, extensionNames, 'community', version);
-      ctx.waitUntil(env.STATUS_KV.put(`upstream-community-presence:${version}`, JSON.stringify({
-        fetchedAtMs: Date.now(), data: upstreamCommunityPresence,
-      }), { expirationTtl: 86400 }));
-    } catch (e) { console.log('upstream-community sync compute failed:', e?.message || e); }
-  }
-
-  // Upstream core-extensions presence — only meaningful for the core list.
-  let upstreamCorePresence = null;
-  const coreNames = (core && Array.isArray(core.extensions))
-    ? core.extensions.map(e => e.name).filter(Boolean) : [];
-  try {
-    const cached = await env.STATUS_KV.get(`upstream-core-presence:${version}`, { type: 'json' });
-    if (cached && cached.data) upstreamCorePresence = cached.data;
-  } catch (_) {}
-  if (!upstreamCorePresence && coreNames.length) {
-    try {
-      upstreamCorePresence = await buildUpstreamPresence(env, coreNames, 'core', version);
-      ctx.waitUntil(env.STATUS_KV.put(`upstream-core-presence:${version}`, JSON.stringify({
-        fetchedAtMs: Date.now(), data: upstreamCorePresence,
-      }), { expirationTtl: 86400 }));
-    } catch (e) { console.log('upstream-core sync compute failed:', e?.message || e); }
-  }
-
   if (registryPresence) community.registries = registryPresence;
 
   if (Array.isArray(community.extensions)) {
     const regMap = (registryPresence && registryPresence.presence) || {};
     const r2Map  = (r2Presence       && r2Presence.presence)       || {};
-    const upMap  = (upstreamCommunityPresence && upstreamCommunityPresence.presence) || {};
     community.extensions = community.extensions.map(ext => ({
       ...ext,
       registries: regMap[ext.name] || null,
       r2:         r2Map[ext.name]  || null,
-      upstream:   upMap[ext.name]  || null,
-    }));
-  }
-
-  // Fold upstream-core presence into each core extension.
-  if (core && Array.isArray(core.extensions) && upstreamCorePresence) {
-    const upMap = upstreamCorePresence.presence || {};
-    core.extensions = core.extensions.map(ext => ({
-      ...ext,
-      upstream: upMap[ext.name] || null,
     }));
   }
 
@@ -254,10 +211,9 @@ export default {
         refreshCacheKey(env, ctx, 'tags',      1800,  () => listEngineTags(env)),
       ]);
 
-      // Presence probes are version-scoped and heavy (~980 outbound HEAD/GETs
-      // per version). To stay under the per-invocation subrequest limit we
-      // prewarm only the LATEST version each tick; older versions' presence is
-      // computed lazily on first visit and then cached.
+      // Presence probes are version-scoped. We prewarm only the LATEST version
+      // each tick; older versions' presence is computed lazily on first visit
+      // and then cached.
       let version = DEFAULT_VERSION;
       try {
         const t = await env.STATUS_KV.get('tags', { type: 'json' });
@@ -277,18 +233,9 @@ export default {
               () => buildRegistryPresence(env, names, version)),
             refreshCacheKey(env, ctx, `r2-presence:${version}`, 86400,
               () => buildR2Presence(env, names, version)),
-            refreshCacheKey(env, ctx, `upstream-community-presence:${version}`, 86400,
-              () => buildUpstreamPresence(env, names, 'community', version)),
           ]);
         } else {
           console.log('prewarm presence: no extensions in matrix');
-        }
-        const coreCache = await env.STATUS_KV.get(`core:${version}`, { type: 'json' });
-        const coreExts = (coreCache && coreCache.data && coreCache.data.extensions) || [];
-        const coreNames = coreExts.map(e => e.name).filter(Boolean);
-        if (coreNames.length) {
-          await refreshCacheKey(env, ctx, `upstream-core-presence:${version}`, 86400,
-            () => buildUpstreamPresence(env, coreNames, 'core', version));
         }
       } catch (e) {
         console.log('prewarm presence:', e?.message || e);

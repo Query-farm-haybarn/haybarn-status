@@ -38,7 +38,7 @@ export const DISCLAIMER = 'DuckDB is a trademark of the DuckDB Foundation.';
 // `haybarn-v1.5.3-rc1` → `1.5.3`); the version-dependent builders below all
 // take a `version` argument. DEFAULT_VERSION is only the fallback for contexts
 // with no tag in hand.
-export const DEFAULT_VERSION = '1.5.2';
+export const DEFAULT_VERSION = '1.5.3';
 
 // Back-compat alias; prefer passing an explicit version.
 export const HAYBARN_VERSION = DEFAULT_VERSION;
@@ -129,26 +129,6 @@ export function r2CoreBinaryUrl(extension, platform, version = DEFAULT_VERSION) 
   const ext = platform.startsWith('wasm_') ? '.duckdb_extension.wasm'
                                            : '.duckdb_extension.gz';
   return `${coreR2Base(version)}/${platform}/${extension}${ext}`;
-}
-
-// Upstream DuckDB extension CDN URLs. We probe these alongside the Haybarn R2
-// paths so the status page can show parity per-extension: if upstream is also
-// failing to ship a binary for v1.5.2, that's not a Haybarn-specific problem.
-export function upstreamCommunityBase(version = DEFAULT_VERSION) {
-  return `https://community-extensions.duckdb.org/v${version}`;
-}
-export function upstreamCoreBase(version = DEFAULT_VERSION) {
-  return `https://extensions.duckdb.org/v${version}`;
-}
-export function upstreamCommunityBinaryUrl(extension, platform, version = DEFAULT_VERSION) {
-  const ext = platform.startsWith('wasm_') ? '.duckdb_extension.wasm'
-                                           : '.duckdb_extension.gz';
-  return `${upstreamCommunityBase(version)}/${platform}/${extension}${ext}`;
-}
-export function upstreamCoreBinaryUrl(extension, platform, version = DEFAULT_VERSION) {
-  const ext = platform.startsWith('wasm_') ? '.duckdb_extension.wasm'
-                                           : '.duckdb_extension.gz';
-  return `${upstreamCoreBase(version)}/${platform}/${extension}${ext}`;
 }
 
 // Filed-upstream-issue tracker. Curated map keyed by extension name.

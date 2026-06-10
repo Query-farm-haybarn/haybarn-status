@@ -4,7 +4,6 @@ import {
   TAG_PREFIX, TAG_REF_PATH, DISCLAIMER, DEFAULT_VERSION,
   npmName, pypiName, KNOWN_UPSTREAM_ISSUES,
   CORE_EXTENSIONS, r2CoreBinaryUrl,
-  upstreamCommunityBinaryUrl, upstreamCoreBinaryUrl,
 } from './repos.js';
 import { enumerateCatalog } from './catalog.js';
 
@@ -440,58 +439,6 @@ async function _probeR2Core(extension, version = DEFAULT_VERSION) {
   } catch (e) {
     return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `r2 ${e && e.message ? e.message : 'fetch'}` };
   }
-}
-
-// ---------------------------------------------------------------------------
-// Upstream DuckDB CDN presence — does the same extension exist on upstream's
-// distribution for the same DuckDB version? Side-by-side with our R2 probe,
-// this lets the status page distinguish "Haybarn-specific failure" from
-// "upstream-wide unavailability for v1.5.2". HEAD against one platform
-// (linux_amd64), same logic as the R2 probe.
-// ---------------------------------------------------------------------------
-
-async function _probeUpstreamUrl(url) {
-  try {
-    const r = await fetch(url, { method: 'HEAD' });
-    if (r.status === 404) return { exists: false, url, platform: R2_PROBE_PLATFORM };
-    if (!r.ok)             return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `upstream ${r.status}` };
-    return {
-      exists: true,
-      url,
-      platform: R2_PROBE_PLATFORM,
-      lastModified: r.headers.get('last-modified') || null,
-      contentLength: r.headers.get('content-length') || null,
-    };
-  } catch (e) {
-    return { exists: false, url, platform: R2_PROBE_PLATFORM, error: `upstream ${e && e.message ? e.message : 'fetch'}` };
-  }
-}
-
-async function _probeUpstreamCommunity(extension, version) {
-  return _probeUpstreamUrl(upstreamCommunityBinaryUrl(extension, R2_PROBE_PLATFORM, version));
-}
-async function _probeUpstreamCore(extension, version) {
-  return _probeUpstreamUrl(upstreamCoreBinaryUrl(extension, R2_PROBE_PLATFORM, version));
-}
-
-export async function buildUpstreamPresence(env, extensionNames, channel, version = DEFAULT_VERSION) {
-  const probe = channel === 'core' ? _probeUpstreamCore : _probeUpstreamCommunity;
-  const out = {};
-  const BATCH = 32;
-  for (let i = 0; i < extensionNames.length; i += BATCH) {
-    const slice = extensionNames.slice(i, i + BATCH);
-    const results = await Promise.all(slice.map(async (ext) => [ext, await probe(ext, version)]));
-    for (const [ext, r] of results) out[ext] = r;
-  }
-  return {
-    fetchedAt: new Date().toISOString(),
-    channel,
-    version,
-    extensionsProbed: extensionNames.length,
-    platform: R2_PROBE_PLATFORM,
-    presence: out,
-    _disclaimer: DISCLAIMER,
-  };
 }
 
 export async function buildCoreCatalog(env, version = DEFAULT_VERSION) {

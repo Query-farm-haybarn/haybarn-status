@@ -949,7 +949,7 @@ export function renderIndex(tagsView) {
     if (a === 'other') return 1;
     if (b === 'other') return -1;
     return b.localeCompare(a, undefined, { numeric: true });
-  });
+  }).slice(0, 1);
   const published = tagsView.published || {};
   const sections = versions.map(v => {
     const links = groups.get(v).map(t => {
