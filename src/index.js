@@ -5,6 +5,10 @@ import {
 } from './collect.js';
 import { renderIndex, renderRcPage, renderError, renderActivityPage, renderInsightsPage } from './render.js';
 import { DISCLAIMER, TAG_PREFIX, DEFAULT_VERSION, parseVersionFromTag } from './repos.js';
+import { notifyDiscord } from './discord.js';
+
+// Must match the second entry in wrangler.toml [triggers] crons.
+const NOTIFY_CRON = '*/2 * * * *';
 
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#161b22"/><text x="16" y="22" font-family="ui-monospace,Menlo,monospace" font-size="18" font-weight="700" fill="#58a6ff" text-anchor="middle">h</text></svg>`;
 
@@ -203,6 +207,16 @@ async function refreshCacheKey(env, ctx, key, staleSec, fetcher) {
 
 export default {
   async scheduled(event, env, ctx) {
+    // Two crons share this handler. */2 only runs the Discord notifier —
+    // a StatusFeed DO-RPC read plus a webhook POST, no GitHub API calls,
+    // so the fast cadence doesn't touch the installation-token budget.
+    // Everything else (the */15 tick) does the heavy cache prewarm below.
+    if (event.cron === NOTIFY_CRON) {
+      ctx.waitUntil(
+        notifyDiscord(env).catch(e => console.log('discord notify:', e?.message || e)),
+      );
+      return;
+    }
     ctx.waitUntil((async () => {
       // Version-independent caches first.
       await Promise.all([

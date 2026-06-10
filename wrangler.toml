@@ -45,8 +45,15 @@ enabled = true
 #   refreshes only fetch jobs for in-progress runs, so once warm the
 #   cost drops back to ~10-30/refresh. */15 is plenty for a status
 #   page where data doesn't change second-by-second.
+#
+# Second cron (*/2): Discord notifier only (src/discord.js). It reads run
+# activity from the StatusFeed service binding (DO RPC) and posts to a
+# channel webhook — zero GitHub API calls — so the fast cadence costs
+# nothing against the token budget above. The scheduled handler dispatches
+# on event.cron; at minutes matching both expressions Cloudflare delivers
+# two separate events, one per cron.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "*/2 * * * *"]
 
 # Custom domain `haybarn-status.query.farm` is bound in the Cloudflare
 # dashboard (Workers & Pages -> haybarn-status -> Domains & Routes ->
@@ -55,3 +62,4 @@ crons = ["*/15 * * * *"]
 #   wrangler secret put GH_APP_ID
 #   wrangler secret put GH_APP_INSTALLATION_ID
 #   wrangler secret put GH_APP_PRIVATE_KEY
+#   wrangler secret put DISCORD_WEBHOOK_URL   # channel webhook for CI alerts
