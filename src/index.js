@@ -167,9 +167,43 @@ function latestVersionFromTags(tags) {
   return versions[0] || null;
 }
 
+// Group the flat tag list into one entry per X.Y.Z version, picking the newest
+// tag for each. `tags` arrives newest-first (numeric desc) from listEngineTags,
+// so the first tag seen for a version is its latest rc. `published` maps a tag
+// to its release/create webhook publish time, when known.
+function versionsFromTags(tagsData) {
+  const tags = (tagsData && tagsData.tags) || [];
+  const published = (tagsData && tagsData.published) || {};
+  const byVersion = new Map();
+  for (const tag of tags) {
+    const version = parseVersionFromTag(tag);
+    if (!version) continue;
+    if (!byVersion.has(version)) {
+      byVersion.set(version, { version, tag, publishedAt: published[tag] || null, tags: [] });
+    }
+    byVersion.get(version).tags.push(tag);
+  }
+  // Map insertion order follows the desc-sorted tag list, so this is newest-first.
+  const versions = [...byVersion.values()];
+  return {
+    fetchedAt: tagsData && tagsData.fetchedAt,
+    latest: versions[0] || null,
+    versions,
+    _disclaimer: DISCLAIMER,
+  };
+}
+
 async function handleIndex(env, ctx) {
   const tags = await getCached(env, ctx, 'tags', 300, 1800, () => listEngineTags(env));
   return html(renderIndex(tags));
+}
+
+// Machine-readable version list. Same underlying data as the `/` index, but
+// reduced to one entry per X.Y.Z with its latest rc tag — consumed by the
+// query.farm Astro site at build time to derive the featured Haybarn release.
+async function handleVersions(env, ctx) {
+  const tags = await getCached(env, ctx, 'tags', 300, 1800, () => listEngineTags(env));
+  return json(versionsFromTags(tags));
 }
 
 // Live activity feed — a tail of the webhook stream. Not cached (the whole
@@ -272,6 +306,7 @@ export default {
         });
       }
       if (pathname === '/') return handleIndex(env, ctx);
+      if (pathname === '/api/versions') return handleVersions(env, ctx);
       if (pathname === '/activity') return handleActivity(env, url, false);
       if (pathname === '/api/activity') return handleActivity(env, url, true);
       if (pathname === '/insights') return handleInsights(env, ctx, false);

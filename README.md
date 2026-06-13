@@ -7,6 +7,11 @@ project, served at **<https://haybarn-status.query.farm>**.
 - `/r/<tag>` — per-rc status across engine, drivers, wasm, and the extension catalog
 - `/api/r/<tag>` — same data as JSON, for scripts, AI agents, and the
   `query.farm` Astro site (which snapshots it at build time)
+- `/api/versions` — JSON list of discovered versions, one entry per `X.Y.Z`
+  with its latest rc `tag`, `publishedAt`, and full `tags` list, plus a
+  `latest` shortcut. The `query.farm` site reads this at build time to derive
+  the featured Haybarn release, so a new rc tag re-points the site on its next
+  build with no code change.
 - `/activity` — live `tail -f`-style feed of the webhook stream (workflow runs,
   jobs, releases), newest first; polls `/api/activity` every 5s and prepends
   new rows. `/api/activity?before=<receivedAt>&limit=` pages backwards.
