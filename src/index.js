@@ -77,8 +77,12 @@ async function handleRcPage(env, ctx, tag, asJson) {
     // stale-while-revalidate window still shields against a transient feed blip.
     getCached(env, ctx, `rc:${tag}`, 10, 300, () => buildRcView(env, tag)),
     getCached(env, ctx, 'forks', 15, 300, () => buildForks(env)),
-    // Community matrix (catalog list + CI runs) is version-independent.
-    getCached(env, ctx, 'community', 30, 86400, () => buildCommunityMatrix(env)),
+    // Community matrix: the catalog (extension list) is version-independent,
+    // but the per-extension CI build status/jobs ARE scoped to this engine
+    // version — community build_all/build.yml runs are filtered by the
+    // `haybarn-v<X.Y.Z>` tag encoded in their run-name. Key per version so a
+    // 1.5.3 rc page never shows a 1.5.2 sweep's build state.
+    getCached(env, ctx, `community:${version}`, 30, 86400, () => buildCommunityMatrix(env, version)),
     // Core catalog — small, fast (~26 R2 HEADs + ~52 registry probes). Version-scoped.
     getCached(env, ctx, `core:${version}`, 60, 3600, () => buildCoreCatalog(env, version)),
   ]);
@@ -254,7 +258,6 @@ export default {
     ctx.waitUntil((async () => {
       // Version-independent caches first.
       await Promise.all([
-        refreshCacheKey(env, ctx, 'community', 86400, () => buildCommunityMatrix(env)),
         refreshCacheKey(env, ctx, 'forks',     300,   () => buildForks(env)),
         refreshCacheKey(env, ctx, 'tags',      1800,  () => listEngineTags(env)),
       ]);
@@ -268,11 +271,17 @@ export default {
         version = latestVersionFromTags(t && t.data && t.data.tags) || DEFAULT_VERSION;
       } catch (_) {}
 
-      await refreshCacheKey(env, ctx, `core:${version}`, 3600,
-        () => buildCoreCatalog(env, version));
+      await Promise.all([
+        refreshCacheKey(env, ctx, `core:${version}`, 3600,
+          () => buildCoreCatalog(env, version)),
+        // Community matrix is version-scoped (build state filtered by engine
+        // tag); prewarm only the latest version, like the presence probes.
+        refreshCacheKey(env, ctx, `community:${version}`, 86400,
+          () => buildCommunityMatrix(env, version)),
+      ]);
 
       try {
-        const cm = await env.STATUS_KV.get('community', { type: 'json' });
+        const cm = await env.STATUS_KV.get(`community:${version}`, { type: 'json' });
         const exts = (cm && cm.data && cm.data.extensions) || [];
         const names = exts.map(e => e.name).filter(Boolean);
         if (names.length) {

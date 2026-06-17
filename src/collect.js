@@ -173,23 +173,50 @@ function parseBuildAllJobName(name) {
   return { extension: m[1], inner: m[2] };
 }
 
+// The engine version a community build run targeted is a run-level DISPATCH
+// INPUT (duckdb_version), never a job-name dimension — so it only surfaces in
+// the run's display_title, which build_all.yml / build.yml encode as the
+// `haybarn-v<X.Y.Z>[-rcN]` tag (e.g. "🐝 sweep haybarn-v1.5.3-rc10 (all
+// extensions)" or "🐤 chess (haybarn-v1.5.3-rc10)"). Pull the plain X.Y.Z out
+// so the matrix can be scoped to the rc page's engine version. Returns null
+// when the title carries no parseable engine tag (older, pre-versioned runs);
+// such runs are intentionally NOT attributed to any version.
+function engineVersionFromTitle(title) {
+  const m = String(title || '').match(/haybarn-v(\d+\.\d+\.\d+)/);
+  return m ? m[1] : null;
+}
+
 // Pull the latest run of build_all.yml (the bulk fan-out workflow) and
 // derive a per-extension matrix from its job list. Used in preference to
 // the per-workflow-run scan when a recent build_all exists — that one
 // run captures every extension being built across the catalog, whereas
 // the per-run scan can only see the most recent ~100 direct invocations
 // of build.yml (which excludes workflow_call children of build_all).
-async function buildMatrixFromBuildAll(env) {
-  // Pick the most recent build_all that wasn't cancelled. A cancelled
-  // run only has the subset of extensions whose matrix legs got
-  // scheduled before cancellation — using it would mean the status
-  // page only shows that subset (the bug surfaced as "only 92
-  // extensions starting at 'oast'" while 240+ were expected).
-  const run = await env.FEED.latestRunForWorkflow(
+async function buildMatrixFromBuildAll(env, version = DEFAULT_VERSION) {
+  // Pick the most recent build_all that (a) targeted THIS engine version and
+  // (b) wasn't cancelled.
+  //
+  // (a) The engine version is a run-level dispatch input, so a single sweep
+  // builds every extension against ONE version. We must not show a 1.5.2 sweep
+  // on a 1.5.3 rc page — so we scan recent sweeps and keep the newest whose
+  // run-name encodes `version`. Sweeps with no parseable engine tag (older runs
+  // dispatched before build_all.yml embedded the version) are skipped: the page
+  // shows "not yet built for this version" rather than misattributing them.
+  //
+  // (b) A cancelled run only has the subset of extensions whose matrix legs got
+  // scheduled before cancellation — using it would mean the status page only
+  // shows that subset (the bug once surfaced as "only 92 extensions starting at
+  // 'oast'" while 240+ were expected).
+  const recent = await env.FEED.recentRunsForWorkflow(
     `${ORG}/${COMMUNITY_REPO.repo}`,
     COMMUNITY_REPO.buildAllWorkflowFile,
     COMMUNITY_REPO.branch,
-    'cancelled',
+    50,
+  );
+  const run = (recent || []).find(
+    (r) =>
+      r.conclusion !== 'cancelled' &&
+      engineVersionFromTitle(r.display_title || r.name) === version,
   );
   if (!run) return null;
 
@@ -513,7 +540,7 @@ async function communityReliabilityMap(env) {
   return out;
 }
 
-export async function buildCommunityMatrix(env) {
+export async function buildCommunityMatrix(env, version = DEFAULT_VERSION) {
   // Canonical catalog enumeration — every extensions/<name>/ subdir in the
   // haybarn-community-extensions repo, with parsed description.yml metadata
   // (version, repo.github, repo.ref). The CI-run sources below fill in the
@@ -533,7 +560,7 @@ export async function buildCommunityMatrix(env) {
   // workflow run captures every extension built across the catalog.
   let buildAllMatrix = null;
   try {
-    buildAllMatrix = await buildMatrixFromBuildAll(env);
+    buildAllMatrix = await buildMatrixFromBuildAll(env, version);
   } catch (e) {
     console.log('buildMatrixFromBuildAll fallback:', e?.message || e);
   }
@@ -547,6 +574,12 @@ export async function buildCommunityMatrix(env) {
   let runs = [];
   try {
     runs = await listRecentCommunityRuns(env);
+    // Scope to this engine version: a direct build.yml dispatch encodes its
+    // target tag in the run-name ("🐤 <ext> (haybarn-v<X.Y.Z>...)"), so we keep
+    // only runs that built against `version`. Runs with no parseable engine tag
+    // (older, pre-versioned dispatches, or path-filtered "push:" runs we can't
+    // attribute anyway) are dropped rather than shown under the wrong version.
+    runs = runs.filter((r) => engineVersionFromTitle(r.display_title || r.name) === version);
   } catch (e) {
     if (!buildAllMatrix) {
       return { fetchedAt: new Date().toISOString(), scannedRuns: 0, extensions: [], error: String(e.message || e), _disclaimer: DISCLAIMER };
